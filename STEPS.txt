@@ -1,16 +1,19 @@
-# Lagoon Step 4.1, round 8: pictures locked to the game frames (town stutter)
+# Lagoon Step 4.6, round 2: second core with thread pinning
 # Every line is a fish comment or a command, so a whole block can be pasted.
-# Logs land in build-port/. Tell Claude "done" after the run.
+# Logs land in build-port/. Tell Claude "done" after each run.
 
 # --- 1. Rebuild (ALWAYS first after Claude changes code) ---
 cd ~/Projects/LagoonSNESRecomp
 cmake --build build-port --target LagoonSNESRecomp 2>&1 | tail -5
 # If the last lines say "error", send them to Claude instead of running.
 
-# --- 2. Play with MangoHud (Shift+F12 hides/shows its box) ---
-# Please check: walking around town (was "too hard to run"), then the cave and a fight,
-# enemies, doors, a sword swing.
+# --- 2. Play with the second core (on by default at 180) ---
+# Walk around town (where it hitched), the cave, a fight. Also try: open/close the
+# menu, the map (M), save in the F7 state menu and load it again, pause.
 cd ~/Projects/LagoonSNESRecomp
 env LAGOON_SMOOTH_LOG=smooth.log SNESRECOMP_FRAME_TIMING=timing.csv SNESRECOMP_HOST_PROFILE=1 mangohud ./build-port/LagoonSNESRecomp --no-launcher --rom lagoon.sfc 2> profile.txt
+# Tell Claude "done": smoothness in town, and whether the controls feel any slower.
 
-# --- 3. Tell Claude "done" and what you saw. ---
+# --- 3. (Only if Claude asks) the same without the second core, for comparison ---
+cd ~/Projects/LagoonSNESRecomp
+env LAGOON_SECOND_CORE=0 mangohud ./build-port/LagoonSNESRecomp --no-launcher --rom lagoon.sfc 2> profile1core.txt

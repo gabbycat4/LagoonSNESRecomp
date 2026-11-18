@@ -32,3 +32,16 @@ double LagoonSmooth_PresentationHz(double display_refresh);
 /* After the scene renderer replaced dst with its verified picture. May
  * overwrite dst with an in-between picture. */
 void LagoonSmooth_Draw(uint8_t *dst, size_t pitch, unsigned width, unsigned height, double alpha);
+/* Second core ([Lagoon] SecondCore = 1, default; LAGOON_SECOND_CORE=0 turns it
+ * off). alpha < 0 marks the field's base picture (composed, not shown). */
+int LagoonSmooth_SecondCore(void);
+void LagoonSmooth_BeginPicture(double alpha);
+/* The base picture may carry in-between pictures only when nothing else is
+ * drawn over the scene (no fade, no loader, no Game Over panel). */
+void LagoonSmooth_SetCalm(int calm);
+/* Camera shift of the last drawn in-between picture (world things drawn by
+ * other code, like the cameo, move by minus this). */
+void LagoonSmooth_LastShift(int *x, int *y);
+/* SnesDesktopHostGame.draw_inbetween body: frozen data only. */
+int LagoonSmooth_DrawInbetween(uint8_t *dst, size_t pitch, unsigned width, unsigned height,
+                               double alpha, int *shift_x, int *shift_y);

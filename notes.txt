@@ -289,3 +289,41 @@ field's first ~2 ms late, though every wait was exact.
 Round 8 (engine, patch regenerated): after each field (simulation_done), snap next_presentation
 onto the grid next_simulation - k * period (moves it <= half a period), so one picture always
 coincides with each field deadline. No math.h used.
+
+Step 4.1 round 8 result: town late pictures 20-30% -> 9%; audio better. Remaining: town game
+frames take 6-15 ms on step fields (many townsfolk) vs 2-4 ms in the cave; a 5.55 ms picture slot
+cannot hide that on one core.
+Step 4.6 (2026-11-18): second core
+Engine (host_main.c/.h):
+- Worker thread runs ONLY RtlRunFrame (sets the thread-local g_audio_producer_active itself).
+  Pipeline: at field N's (early) sim point: join job N -> after_run_frame, capture (raster on the
+  main thread; the beam driver rasterizes from its journal at capture, not during the run),
+  NoteStateFrame -> compose the base picture with g_compose_only (fills g_frozen_frame, not
+  shown, alpha -1) -> start job N+1 with this field's input -> pictures via PresentInbetween
+  (game->draw_inbetween from frozen data, or g_frozen_frame again). Input +1 field.
+- Joins: at the sim point (before menus/overlays/pause/launcher/rewind), at the loop top when
+  queued events other than motion/sensor exist, EmuDiscard when the mode turns off, EmuStop at
+  exit ([second-core] jobs, guest mean/max ms, joins that waited).
+- Off for turbo and run-ahead. Fibers (fiber_compat) are not built into Lagoon.
+- New hooks (host_main.h, after presentation_hz): emulation_thread, draw_inbetween.
+Lagoon:
+- LagoonSmooth_SecondCore: [Lagoon] SecondCore (default 1) when PicturesPerSecond > 60;
+  LAGOON_SECOND_CORE=0 turns it off for one run.
+- Base picture (alpha < 0): packet processed, base_ok = calm (INIDISP 15, no loader $100E, no
+  Game Over) && moving && check ok. LagoonHost_DrawInbetween: scene in-between + boss HUD
+  (captured packet) + cameo (moved by -shift) + achievement toast. Non-threaded compose also
+  moves the cameo by LagoonSmooth_LastShift now.
+Patches: patches/lagoon-framework.patch = their cumulative patch with its host_main.c/.h
+sections regenerated (theirs + ours; tools/apply_framework_patch.py sees it as applied, and it
+applies cleanly to a fresh engine with an identical result). Their original is kept as
+patches/lagoon-framework.upstream.patch; patches/gabbycat4-smooth.patch = only our part.
+Compile-checked with the real build flags + SDL3 headers from build-port/_deps (all files clean).
+
+Step 4.6 round 1 result: stutter gone, but ~120 FPS with spikes. Log: guest on the worker 7.3 ms
+mean (3.3-4.1 on the main thread), raster 2.1 ms (was ~1), joins waited on 92% of fields (5.5 ms
+average), the guest fell to 53.7 fields/s. No audio waits. = the NES symptom of unpinned threads
+(SMT twins / different CCX).
+Round 2: src/lagoon_affinity.c (port of nesrecomp cyc_affinity.c): guest thread = first CPU of
+the second core of the largest L3 group, main thread = the rest of that group minus the guest's
+SMT twin. Engine hook pin_thread(role): main before SDL_CreateThread, worker at its top.
+LAGOON_PIN=0 turns it off. stderr prints "[lagoon threads] guest on CPU x, main on CPUs ...".

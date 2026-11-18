@@ -2355,7 +2355,7 @@ index a1e1802..2ac0be5 100644
  uint32 interp_bridge_lle_resume_pc(void);
  void interp_bridge_set_lle_bounce_exclusions(const uint32 *targets,
 diff --git a/runner/src/desktop/host_main.c b/runner/src/desktop/host_main.c
-index d65335e..9bbb0dc 100644
+index d65335ee..268430ba 100644
 --- a/runner/src/desktop/host_main.c
 +++ b/runner/src/desktop/host_main.c
 @@ -257,6 +257,29 @@ static const char *HostGetenv(const char *name) {
@@ -2623,7 +2623,7 @@ index d65335e..9bbb0dc 100644
          return 0;
        }
        if (e->mask & kScriptReset) {
-@@ -1462,15 +1583,41 @@ static void WritePpm(const char *path, const uint8 *pixel_buffer, int pitch,
+@@ -1462,19 +1583,58 @@ static void WritePpm(const char *path, const uint8 *pixel_buffer, int pitch,
      host_report_breadcrumb("screenshot: wrote %s (%dx%d) at frame %u", path, w, h, frame);
  }
  
@@ -2650,6 +2650,10 @@ index d65335e..9bbb0dc 100644
 +  return path;
 +}
 +
++/* gabbycat4 smooth motion (second core): compose the frame (and refresh
++ * g_frozen_frame) without presenting it. */
++static bool g_compose_only;
++static uint8_t g_compose_only_buffer[kSnesDesktopMaxFrameWidth * 4 * 480];
  static void DrawPpuFrameWithPerf(void) {
 -  double profile_start = ProfileStart();
 +  ProfileStamp profile_start = ProfileStart();
@@ -2660,15 +2664,30 @@ index d65335e..9bbb0dc 100644
  
 -  g_renderer_funcs.BeginDraw(g_snes_width * render_scale,
 -                             g_snes_height * render_scale,
+-                             &present_buffer, &present_pitch);
 +  int presentation_w = g_snes_width, presentation_h = g_snes_height;
 +  if (g_game->presentation_geometry)
 +    g_game->presentation_geometry(g_snes_width, g_snes_height, &presentation_w, &presentation_h);
-+  g_renderer_funcs.BeginDraw(presentation_w * render_scale,
-+                             presentation_h * render_scale,
-                              &present_buffer, &present_pitch);
++  if (g_compose_only) {
++    if (presentation_w > 0 && presentation_h > 0 &&
++        presentation_w * render_scale <= kSnesDesktopMaxFrameWidth &&
++        presentation_h * render_scale <= 480) {
++      present_buffer = g_compose_only_buffer;
++      present_pitch = presentation_w * render_scale * 4;
++    }
++  } else {
++    g_renderer_funcs.BeginDraw(presentation_w * render_scale,
++                               presentation_h * render_scale,
++                               &present_buffer, &present_pitch);
++  }
    ProfileEnd(kProfileAcquire, profile_start);
    if (!present_buffer) {
-@@ -1485,6 +1632,7 @@ static void DrawPpuFrameWithPerf(void) {
+-    g_renderer_funcs.EndDraw();
++    if (!g_compose_only) g_renderer_funcs.EndDraw();
+     return;
+   }
+ 
+@@ -1485,6 +1645,7 @@ static void DrawPpuFrameWithPerf(void) {
     * draw/blend/snapshot/OSD order and upload the same bytes once at the end. */
    uint8 *pixel_buffer = present_buffer;
    int pitch = present_pitch;
@@ -2676,7 +2695,7 @@ index d65335e..9bbb0dc 100644
  #if defined(SNESRECOMP_HOST_HAS_BLEND) || SNESRECOMP_FRAME_STAGING_HLE
    const size_t frame_bytes = (size_t)(g_snes_width * render_scale) *
                               (size_t)(g_snes_height * render_scale) * 4u;
-@@ -1501,6 +1649,10 @@ static void DrawPpuFrameWithPerf(void) {
+@@ -1501,6 +1662,10 @@ static void DrawPpuFrameWithPerf(void) {
    }
  #endif
  
@@ -2687,7 +2706,7 @@ index d65335e..9bbb0dc 100644
    profile_start = ProfileStart();
    RtlDrawPpuFrame(pixel_buffer, pitch, g_ppu_render_flags);
  #if defined(SNESRECOMP_HOST_HAS_BLEND)
-@@ -1537,24 +1689,6 @@ static void DrawPpuFrameWithPerf(void) {
+@@ -1537,24 +1702,6 @@ static void DrawPpuFrameWithPerf(void) {
      }
    }
  #endif
@@ -2712,7 +2731,7 @@ index d65335e..9bbb0dc 100644
    const SnesHdFrame *hd = NULL;
    SnesHdView hd_view;
    if (g_config.mode7.enabled && !g_config.frame_blend) {
-@@ -1674,7 +1808,7 @@ static void DrawPpuFrameWithPerf(void) {
+@@ -1674,7 +1821,7 @@ static void DrawPpuFrameWithPerf(void) {
  #if defined(SNESRECOMP_HOST_HAS_BLEND) || SNESRECOMP_FRAME_STAGING_HLE
    /* One linear, write-only copy into the presenter's buffer -- the access
     * pattern write-combined memory is good at. */
@@ -2721,7 +2740,7 @@ index d65335e..9bbb0dc 100644
      const int rows = g_snes_height * render_scale;
      const int row_bytes = g_snes_width * render_scale * 4;
      for (int y = 0; y < rows; y++)
-@@ -1683,8 +1817,54 @@ static void DrawPpuFrameWithPerf(void) {
+@@ -1683,8 +1830,55 @@ static void DrawPpuFrameWithPerf(void) {
    }
  #endif
  
@@ -2761,6 +2780,7 @@ index d65335e..9bbb0dc 100644
 +      memcpy(upload_buffer + (size_t)y * upload_pitch,
 +             present_buffer + (size_t)y * present_pitch, (size_t)presentation_w * 4);
    ProfileEnd(kProfileCompose, profile_start);
++  if (g_compose_only) return;   /* composed and frozen; shown by PresentInbetween */
    profile_start = ProfileStart();
 +  if (g_config.output_method != kOutputMethod_OpenGL && g_game->renderer_capture) {
 +    const char *path = DisplayScreenshotPath(g_present_frame);
@@ -2776,7 +2796,7 @@ index d65335e..9bbb0dc 100644
    g_renderer_funcs.EndDraw();
    ProfileEnd(kProfilePresent, profile_start);
    RecordFrameTiming(g_present_frame);
-@@ -1784,7 +1964,11 @@ static bool HandleDeviceEvent(const SDL_Event *event) {
+@@ -1784,7 +1978,11 @@ static bool HandleDeviceEvent(const SDL_Event *event) {
   * can be navigated. */
  static bool g_overlay_modal;
  static void SetAudioPaused(bool paused);
@@ -2789,7 +2809,7 @@ index d65335e..9bbb0dc 100644
  
  /* Buttons still held when a panel closed, masked from the guest until each
   * is released. The button that closed the panel must not also act in the
-@@ -1944,6 +2128,10 @@ static long g_selftest_pad_frame = -2;
+@@ -1944,6 +2142,10 @@ static long g_selftest_pad_frame = -2;
  static int g_selftest_pad_phase;      /* 0 idle, 1 browser, 2 rewind */
  static int g_selftest_pad_failed;
  static int g_selftest_pad_opened;     /* bit 1: browser opened, bit 2: rewind */
@@ -2800,7 +2820,7 @@ index d65335e..9bbb0dc 100644
  /* While the self-test is armed, only the virtual pad is opened: a real
   * controller plugged in would take player 1 and the virtual one would land
   * on seat 2, where no overlay gesture reads -- and a test that then finds
-@@ -1962,10 +2150,50 @@ static void SelftestPadSet(int button, bool down) {
+@@ -1962,10 +2164,50 @@ static void SelftestPadSet(int button, bool down) {
  static void SelftestPadReleaseAll(void) {
    for (int b = 0; b < 15; b++) SelftestPadSet(b, false);
  }
@@ -2852,7 +2872,7 @@ index d65335e..9bbb0dc 100644
  #if SNESRECOMP_SDL3
    SDL_VirtualJoystickDesc desc;
    SDL_INIT_INTERFACE(&desc);
-@@ -1988,6 +2216,7 @@ static void OverlaySelftestPadAttach(void) {
+@@ -1988,6 +2230,7 @@ static void OverlaySelftestPadAttach(void) {
  static void OverlaySelftestPadMainTick(unsigned frame) {
    static unsigned last_frame = ~0u;
    if (!g_selftest_pad) return;
@@ -2860,7 +2880,7 @@ index d65335e..9bbb0dc 100644
    /* The main loop iterates more than once per simulated frame while it
     * paces; act once per frame. */
    if (frame == last_frame) return;
-@@ -2051,11 +2280,28 @@ static void OverlaySelftestPadTick(unsigned pump) {
+@@ -2051,11 +2294,28 @@ static void OverlaySelftestPadTick(unsigned pump) {
   * shapes: the save-state browser is an opaque full-rect panel, the rewind
   * filmstrip belongs across the bottom third of the frame, annotating the
   * moment it describes. */
@@ -2890,7 +2910,7 @@ index d65335e..9bbb0dc 100644
      panel = NULL;
  
    /* The draw buffer is the FROZEN FRAME at twice its size, whichever panel
-@@ -2066,29 +2312,54 @@ static void PresentFrozenWithOverlay(void) {
+@@ -2066,29 +2326,54 @@ static void PresentFrozenWithOverlay(void) {
     * middle of the window. */
    const int base_w = g_frozen_w > 0 ? g_frozen_w : g_snes_width;
    const int base_h = g_frozen_h > 0 ? g_frozen_h : g_snes_height;
@@ -2949,7 +2969,7 @@ index d65335e..9bbb0dc 100644
      } else {
        /* Full width, anchored to the bottom, at the strip's own height when
         * it fits (1:1 on the stock field, so its text stays crisp), else
-@@ -2105,9 +2376,10 @@ static void PresentFrozenWithOverlay(void) {
+@@ -2105,9 +2390,10 @@ static void PresentFrozenWithOverlay(void) {
     * to check that a panel actually reaches the screen rather than inferring
     * it from the module reporting itself open. */
    {
@@ -2963,7 +2983,7 @@ index d65335e..9bbb0dc 100644
      if (dump && !*dumped && panel) {
        FILE *f = fopen(dump, "wb");
        if (f) {
-@@ -2122,12 +2394,34 @@ static void PresentFrozenWithOverlay(void) {
+@@ -2122,12 +2408,34 @@ static void PresentFrozenWithOverlay(void) {
          fclose(f);
          *dumped = 1;
          fprintf(stderr, "[overlay_dump] wrote %s (%dx%d, %s)\n", dump, draw_w, draw_h,
@@ -2999,7 +3019,7 @@ index d65335e..9bbb0dc 100644
  }
  
  /* Save-state browser's modal pump. The guest is FROZEN throughout: this loop
-@@ -2166,6 +2460,54 @@ static void RunSavestateMenuLoop(bool *running) {
+@@ -2166,6 +2474,54 @@ static void RunSavestateMenuLoop(bool *running) {
                           frames);
  }
  
@@ -3054,7 +3074,7 @@ index d65335e..9bbb0dc 100644
  static void RewindKeyDown(int key, int repeat) {
    (void)repeat;
    switch (key) {
-@@ -2263,6 +2605,7 @@ static void ResetAudioTimeline(void) {
+@@ -2263,6 +2619,7 @@ static void ResetAudioTimeline(void) {
    RtlApuLock();
    g_audiobuffer_end = g_audiobuffer_cur;
    g_audio_primed = false;
@@ -3062,7 +3082,7 @@ index d65335e..9bbb0dc 100644
    RtlApuUnlock();
  #if SNESRECOMP_SDL3
    /* The stream callback takes the APU mutex: never acquire SDL's stream
-@@ -2271,13 +2614,31 @@ static void ResetAudioTimeline(void) {
+@@ -2271,13 +2628,31 @@ static void ResetAudioTimeline(void) {
  #endif
  }
  
@@ -3095,7 +3115,7 @@ index d65335e..9bbb0dc 100644
    SDL_UnlockMutex(g_audio_mutex);
    if (g_apu_lock_depth == 0 && g_audio_producer_active)
      RtlAudioWaitForConsumer();
-@@ -2286,6 +2647,8 @@ void RtlApuUnlock(void) {
+@@ -2286,6 +2661,8 @@ void RtlApuUnlock(void) {
  static void HostWaitForAudioProducer(void) {
    if (!g_audio_producer_active || !g_snes || !g_snes->apu) return;
    uint32_t start = (uint32_t)SDL_GetTicks();
@@ -3104,7 +3124,7 @@ index d65335e..9bbb0dc 100644
    for (;;) {
      RtlApuLock();
      uint32_t queued = dsp_available(g_snes->apu->dsp);
-@@ -2293,19 +2656,30 @@ static void HostWaitForAudioProducer(void) {
+@@ -2293,19 +2670,30 @@ static void HostWaitForAudioProducer(void) {
      RtlApuUnlock();
      if (queued <= HOST_AUDIO_HIGH_WATER) {
        g_audio_consumer_stalled = false;
@@ -3121,12 +3141,12 @@ index d65335e..9bbb0dc 100644
        g_audio_stalled_read = read;
 -      return;
 +      break;
-     }
++    }
 +    if (!measured && ProfileAudioProducer()) {
 +      measured = true;
 +      wait_start = MonotonicSeconds();
 +      ++g_profile_audio.highwater_waits;
-+    }
+     }
 +    double sleep_start = measured ? MonotonicSeconds() : 0;
      SDL_Delay(1);
 +    if (measured) {
@@ -3138,7 +3158,7 @@ index d65335e..9bbb0dc 100644
  }
  
  /* Backend-agnostic mixer body. SDL2 calls it from its pull callback; SDL3 calls
-@@ -2319,6 +2693,14 @@ static void FillAudioBuffer(Uint8 *stream, int len) {
+@@ -2319,6 +2707,14 @@ static void FillAudioBuffer(Uint8 *stream, int len) {
    if (!snesrecomp_sdl_lock_mutex(g_audio_mutex)) Die("Mutex lock failed!");
    while (len != 0) {
      if (g_audiobuffer_end - g_audiobuffer_cur == 0) {
@@ -3153,7 +3173,7 @@ index d65335e..9bbb0dc 100644
        uint32_t available = dsp_available(g_snes->apu->dsp);
        if (!g_audio_primed && available < HOST_AUDIO_PREFILL) {
          /* Startup/save-load starvation needs a cushion before playback
-@@ -2329,6 +2711,12 @@ static void FillAudioBuffer(Uint8 *stream, int len) {
+@@ -2329,6 +2725,12 @@ static void FillAudioBuffer(Uint8 *stream, int len) {
        } else {
          g_audio_primed = true;
          RtlRenderAudio((int16 *)g_audiobuffer, g_frames_per_block, g_audio_channels);
@@ -3166,7 +3186,7 @@ index d65335e..9bbb0dc 100644
          if (dsp_available(g_snes->apu->dsp) < 4)
            g_audio_primed = false;
        }
-@@ -2392,14 +2780,50 @@ static void SetAudioPaused(bool paused) {
+@@ -2392,14 +2794,50 @@ static void SetAudioPaused(bool paused) {
  #endif
  }
  
@@ -3217,7 +3237,7 @@ index d65335e..9bbb0dc 100644
    (void)window;
    if (g_config.shader)
      fprintf(stderr, "Warning: Shaders are supported only with the OpenGL backend\n");
-@@ -2461,15 +2885,21 @@ static void SdlRenderer_BeginDraw(int width, int height, uint8 **pixels, int *pi
+@@ -2461,15 +2899,21 @@ static void SdlRenderer_BeginDraw(int width, int height, uint8 **pixels, int *pi
      if (!g_texture)
        Die("SDL texture allocation failed");
      snesrecomp_sdl_set_texture_linear(g_texture, g_config.linear_filtering);
@@ -3242,7 +3262,7 @@ index d65335e..9bbb0dc 100644
      g_game->compute_viewport(width, height, output_width, output_height, &viewport);
    g_sdl_present_rect.x = viewport.x;
    g_sdl_present_rect.y = viewport.y;
-@@ -2491,6 +2921,42 @@ static void SdlRenderer_EndDraw(void) {
+@@ -2491,6 +2935,42 @@ static void SdlRenderer_EndDraw(void) {
    /* SDL3's SDL_RenderTexture takes SDL_FRect, not SDL_Rect. */
    snesrecomp_sdl_render_texture(g_renderer, g_texture, &g_sdl_renderer_rect,
                                  &g_sdl_present_rect);
@@ -3285,7 +3305,7 @@ index d65335e..9bbb0dc 100644
    SDL_RenderPresent(g_renderer);
  }
  
-@@ -2501,7 +2967,8 @@ static void SdlRenderer_Reconfigure(void) {
+@@ -2501,7 +2981,8 @@ static void SdlRenderer_Reconfigure(void) {
    if (g_config.output_method != kOutputMethod_SDLSoftware)
      snesrecomp_sdl_set_render_vsync(g_renderer, VSyncInterval());
    if (g_texture)
@@ -3295,7 +3315,7 @@ index d65335e..9bbb0dc 100644
  }
  
  static const struct RendererFuncs kSdlRendererFuncs = {
-@@ -2949,14 +3416,16 @@ static void LauncherSeed(RecompLauncherCSettings *ls, RecompLauncherCGameInfo *g
+@@ -2949,14 +3430,16 @@ static void LauncherSeed(RecompLauncherCSettings *ls, RecompLauncherCGameInfo *g
    ls->enable_audio  = g_config.enable_audio;
    ls->audio_freq    = g_config.audio_freq;
    ls->volume        = g_config.volume;
@@ -3316,7 +3336,7 @@ index d65335e..9bbb0dc 100644
    ls->player_src[1] = ConfigHasPlayerSource(1) ? g_config.player_src[1]
                                                 : (g_config.enable_gamepad[1] ? 2 : 0);
    for (int seat = 2; seat < kSnesHostPadSeats && seat < RECOMP_LAUNCHER_MAX_PLAYERS; ++seat)
-@@ -3101,9 +3570,9 @@ static void LauncherCommit(const RecompLauncherCSettings *ls, const char *config
+@@ -3101,9 +3584,9 @@ static void LauncherCommit(const RecompLauncherCSettings *ls, const char *config
      /* Seats past the game's count are not on the launcher's page; keep them. */
      if (seat >= 2 && seat >= HostConfiguredSeats()) break;
      g_config.player_src[seat]     = ls->player_src[seat];
@@ -3328,7 +3348,188 @@ index d65335e..9bbb0dc 100644
  #endif
    }
    g_config.gamepad_deadzone    = (ls->deadzone[0] * 32767 + 50) / 100;
-@@ -3781,6 +4250,12 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc, char **ar
+@@ -3343,6 +3826,180 @@ static void RunInGameLauncher(bool *running, const char **exit_reason) {
+ #endif
+ }
+ 
++/* ── gabbycat4 smooth motion: second core ─────────────────────────────────
++ * With decoupled presentation the guest's next field can run on a worker
++ * thread while this thread shows the current field's in-between pictures.
++ * The worker runs ONLY RtlRunFrame. Everything else (input, hooks, the PPU
++ * raster capture, the composed base picture, overlays, menus, save states)
++ * stays here and happens while the worker is idle:
++ *   field N:  join job N -> after_run_frame, capture, compose base picture
++ *             (not shown) -> start job N+1 with this field's input -> show
++ *             N's pictures through game->draw_inbetween (frozen data only).
++ * Cost: input reaches the guest one field later. Any event joins first. */
++#if SNESRECOMP_SDL3
++#define EMU_SEM SDL_Semaphore
++#define EMU_SEM_WAIT(s) SDL_WaitSemaphore(s)
++#define EMU_SEM_POST(s) SDL_SignalSemaphore(s)
++#define EMU_SEM_TRY(s) SDL_TryWaitSemaphore(s)
++#define EMU_EVENT_FIRST SDL_EVENT_FIRST
++#define EMU_EVENT_LAST SDL_EVENT_LAST
++#else
++#define EMU_SEM SDL_sem
++#define EMU_SEM_WAIT(s) SDL_SemWait(s)
++#define EMU_SEM_POST(s) SDL_SemPost(s)
++#define EMU_SEM_TRY(s) (SDL_SemTryWait(s) == 0)
++#define EMU_EVENT_FIRST SDL_FIRSTEVENT
++#define EMU_EVENT_LAST SDL_LASTEVENT
++#endif
++static struct {
++  SDL_Thread *thread;
++  EMU_SEM *go, *done;
++  int state;              /* 0 idle, 1 running, 2 finished but not yet used */
++  volatile int quit;
++  uint32 word;
++  bool audio;             /* the worker produces guest audio this job */
++  double seconds;         /* the last job's guest time (worker-written) */
++  unsigned long long jobs, waits;
++  double total, max, waited;
++} g_emu;
++
++static int SDLCALL EmuWorkerMain(void *unused) {
++  (void)unused;
++  if (g_game->pin_thread) g_game->pin_thread(1);   /* a core of its own */
++  for (;;) {
++    EMU_SEM_WAIT(g_emu.go);
++    if (g_emu.quit) break;
++    double t = MonotonicSeconds();
++    g_audio_producer_active = g_emu.audio;   /* thread-local: this thread */
++    RtlRunFrame(g_emu.word);
++    g_audio_producer_active = false;
++    g_emu.seconds = MonotonicSeconds() - t;
++    EMU_SEM_POST(g_emu.done);
++  }
++  return 0;
++}
++
++static bool EmuStart(uint32 word, bool audio) {
++  if (!g_emu.thread) {
++    if (!g_emu.go) g_emu.go = SDL_CreateSemaphore(0);
++    if (!g_emu.done) g_emu.done = SDL_CreateSemaphore(0);
++    if (!g_emu.go || !g_emu.done) return false;
++    if (g_game->pin_thread) g_game->pin_thread(0);   /* main: the guest's L3 group */
++    g_emu.thread = SDL_CreateThread(EmuWorkerMain, "guest", NULL);
++    if (!g_emu.thread) return false;
++    host_report_breadcrumb("second core: guest worker thread started");
++  }
++  g_emu.word = word;
++  g_emu.audio = audio;
++  g_emu.state = 1;
++  EMU_SEM_POST(g_emu.go);
++  return true;
++}
++
++static void EmuJoin(void) {
++  if (g_emu.state != 1) return;
++  if (!EMU_SEM_TRY(g_emu.done)) {
++    double t = MonotonicSeconds();
++    EMU_SEM_WAIT(g_emu.done);
++    g_emu.waited += MonotonicSeconds() - t;
++    ++g_emu.waits;
++  }
++  g_emu.state = 2;
++  ++g_emu.jobs;
++  g_emu.total += g_emu.seconds;
++  if (g_emu.seconds > g_emu.max) g_emu.max = g_emu.seconds;
++}
++
++static bool EmuTake(void) {
++  EmuJoin();
++  if (g_emu.state != 2) return false;
++  g_emu.state = 0;
++  return true;
++}
++
++static void EmuDiscard(void) { EmuJoin(); g_emu.state = 0; }
++
++static void EmuStop(void) {
++  EmuDiscard();
++  if (g_emu.thread) {
++    g_emu.quit = 1;
++    EMU_SEM_POST(g_emu.go);
++    SDL_WaitThread(g_emu.thread, NULL);
++    g_emu.thread = NULL;
++  }
++  if (g_emu.jobs)
++    fprintf(stderr, "[second-core] jobs=%llu guest_mean_ms=%.3f guest_max_ms=%.3f "
++            "joins_that_waited=%llu waited_ms=%.1f\n", g_emu.jobs,
++            1000.0 * g_emu.total / (double)g_emu.jobs, 1000.0 * g_emu.max,
++            g_emu.waits, 1000.0 * g_emu.waited);
++}
++
++/* Queued events that may touch the guest (keys, buttons, window, quit...).
++ * Pure motion/sensor events only update host input state: a pad's stick
++ * noise must not force the guest idle every picture. */
++static bool EmuEventsNeedIdleGuest(void) {
++  SDL_Event ev[32];
++  SDL_PumpEvents();
++  int n = SDL_PeepEvents(ev, 32, SDL_PEEKEVENT, EMU_EVENT_FIRST, EMU_EVENT_LAST);
++  if (n >= 32) return true;
++  for (int i = 0; i < n; ++i) {
++    switch (ev[i].type) {
++#if SNESRECOMP_SDL3
++      case SDL_EVENT_MOUSE_MOTION: case SDL_EVENT_JOYSTICK_AXIS_MOTION:
++      case SDL_EVENT_JOYSTICK_BALL_MOTION: case SDL_EVENT_GAMEPAD_AXIS_MOTION:
++      case SDL_EVENT_GAMEPAD_TOUCHPAD_MOTION: case SDL_EVENT_GAMEPAD_SENSOR_UPDATE:
++      case SDL_EVENT_SENSOR_UPDATE:
++#else
++      case SDL_MOUSEMOTION: case SDL_JOYAXISMOTION: case SDL_JOYBALLMOTION:
++      case SDL_CONTROLLERAXISMOTION: case SDL_CONTROLLERTOUCHPADMOTION:
++      case SDL_CONTROLLERSENSORUPDATE: case SDL_SENSORUPDATE:
++#endif
++        break;
++      default:
++        return true;
++    }
++  }
++  return false;
++}
++
++static bool EmuWanted(bool paced_custom) {
++  return paced_custom && g_game->emulation_thread && g_game->emulation_thread() &&
++         !g_turbo && !snes_runahead_active();
++}
++
++/* One picture while the guest may be running on the worker: the title draws
++ * an in-between picture from frozen data, or the last composed picture is
++ * shown again. Reads nothing the worker writes. */
++static void PresentInbetween(void) {
++  ProfileStamp profile_start = ProfileStart();
++  const int w = g_frozen_w, h = g_frozen_h;
++  if (w <= 0 || h <= 0) return;
++  uint8 *buffer = 0;
++  int pitch = 0;
++  g_renderer_funcs.BeginDraw(w, h, &buffer, &pitch);
++  ProfileEnd(kProfileAcquire, profile_start);
++  if (!buffer) { g_renderer_funcs.EndDraw(); return; }
++  profile_start = ProfileStart();
++  static uint8 inbetween[kSnesDesktopMaxFrameWidth * 240 * 4];
++  bool drawn = false;
++  if (g_game->draw_inbetween && w == g_snes_width && h == g_snes_height &&
++      w <= kSnesDesktopMaxFrameWidth && h <= 240 &&
++      g_game->draw_inbetween(inbetween, (size_t)w * 4, g_my_pixels, w, h, g_present_alpha)) {
++    ComposeOsd(inbetween, w * 4, w, h, 2);
++    for (int y = 0; y < h; ++y)
++      memcpy(buffer + (size_t)y * pitch, inbetween + (size_t)y * w * 4, (size_t)w * 4);
++    drawn = true;
++  }
++  if (!drawn)
++    for (int y = 0; y < h; ++y)
++      memcpy(buffer + (size_t)y * pitch, g_frozen_frame + (size_t)y * w * 4, (size_t)w * 4);
++  ProfileEnd(kProfileCompose, profile_start);
++  profile_start = ProfileStart();
++  g_renderer_funcs.EndDraw();
++  ProfileEnd(kProfilePresent, profile_start);
++  RecordFrameTiming(g_present_frame);
++}
++
+ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc, char **argv) {
+   if (!game || !game->game_info || !game->display_name) {
+     fprintf(stderr, "snesrecomp_desktop_main: descriptor needs display_name and game_info\n");
+@@ -3781,6 +4438,12 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc, char **ar
    g_ppu_render_flags = g_config.new_renderer * kPpuRenderFlags_NewRenderer |
      g_config.no_sprite_limits * kPpuRenderFlags_NoSpriteLimits;
  
@@ -3341,7 +3542,7 @@ index d65335e..9bbb0dc 100644
    if (g_config.fullscreen == 1)
      g_win_flags ^= SNESRECOMP_SDL_WINDOW_FULLSCREEN_DESKTOP;
    else if (g_config.fullscreen == 2)
-@@ -3826,6 +4301,9 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc, char **ar
+@@ -3826,6 +4489,9 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc, char **ar
        g_current_window_scale * WindowBaseHeight();
  
    RendererApply(RendererChoice());
@@ -3351,7 +3552,7 @@ index d65335e..9bbb0dc 100644
  #ifndef __ANDROID__
    if (g_config.output_method == kOutputMethod_OpenGL) {
      SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
-@@ -4064,6 +4542,17 @@ error_reading:;
+@@ -4064,6 +4730,17 @@ error_reading:;
  
    PreparePpuFrame();
  
@@ -3369,7 +3570,7 @@ index d65335e..9bbb0dc 100644
    MkDir("saves");
    if (!g_netplay_session) RtlReadSram();
  
-@@ -4078,7 +4567,10 @@ error_reading:;
+@@ -4078,7 +4755,10 @@ error_reading:;
     * file is one-shot -- a later plain launch must not resume it again. */
    if (args.resume_state) {
      bool resumed = RtlLoadSnapshot(args.resume_state);
@@ -3381,7 +3582,7 @@ index d65335e..9bbb0dc 100644
      host_report_breadcrumb("resume state %s: %s", resumed ? "loaded" : "FAILED to load (kept)",
                             args.resume_state);
      if (resumed) remove(args.resume_state);
-@@ -4117,6 +4609,7 @@ error_reading:;
+@@ -4117,6 +4797,7 @@ error_reading:;
    if (frame_timing_path) g_frame_timings = calloc(kFrameTimingCapacity, sizeof(*g_frame_timings));
    bool profile_requested = g_frame_timings ||
        (HostGetenv("HOST_PROFILE") && atoi(HostGetenv("HOST_PROFILE")) != 0);
@@ -3389,7 +3590,7 @@ index d65335e..9bbb0dc 100644
    unsigned profile_first = HostGetenv("HOST_PROFILE_START_FRAME")
        ? (unsigned)strtoul(HostGetenv("HOST_PROFILE_START_FRAME"), NULL, 10) : 1;
    if (!profile_first) profile_first = 1;
-@@ -4152,7 +4645,8 @@ error_reading:;
+@@ -4152,7 +4833,8 @@ error_reading:;
      }
      if (g_state_generation != RtlStateGeneration()) {
        SnesHdCaptureReset(g_hd_capture);
@@ -3399,16 +3600,19 @@ index d65335e..9bbb0dc 100644
        snes_rewind_shutdown();
        snes_rewind_configure();
        g_state_generation = RtlStateGeneration();
-@@ -4163,7 +4657,7 @@ error_reading:;
+@@ -4163,7 +4845,10 @@ error_reading:;
       * whole crash-capture pipeline (minidump + report + crash copy). */
      host_report_crash_test_tick();
  
 -    double event_profile_start = ProfileStart();
++    /* gabbycat4 second core: events may load states, reset or open menus;
++     * handle them only while the guest is idle. */
++    if (g_emu.state == 1 && EmuEventsNeedIdleGuest()) EmuJoin();
 +    ProfileStamp event_profile_start = ProfileStart();
      while (SDL_PollEvent(&event)) {
        if (HandleDeviceEvent(&event))
          continue;
-@@ -4242,8 +4736,7 @@ error_reading:;
+@@ -4242,8 +4927,7 @@ error_reading:;
      {
        int ls = debug_server_consume_loadstate();
        if (ls >= 0 && !g_netplay_session) {
@@ -3418,7 +3622,7 @@ index d65335e..9bbb0dc 100644
        }
        int ss = debug_server_consume_savestate();
        if (ss >= 0 && !g_netplay_session)
-@@ -4308,7 +4801,7 @@ error_reading:;
+@@ -4308,7 +4992,7 @@ error_reading:;
          for (;;) {
            uint32 inputs = snes_netplay_published_inputs() | snes_netplay_active_mask();
            g_profile_frame = frameCtr + 1;
@@ -3427,7 +3631,64 @@ index d65335e..9bbb0dc 100644
            if (game->before_run_frame) game->before_run_frame();
            RtlRunFrame(inputs);
            ProfileEnd(kProfileGuest, profile_start);
-@@ -4536,6 +5029,11 @@ error_reading:;
+@@ -4376,24 +5060,52 @@ error_reading:;
+       snes_host_clock_reset(&video_clock, video_now, g_simulation_hz, presentation_hz);
+       g_reset_clock = false;
+     }
+-    if (paced_realtime && !snes_host_clock_simulation_due(&video_clock, MonotonicSeconds())) {
++    /* gabbycat4 smooth motion: with decoupled presentation the next field may
++     * run up to 90% of one picture period EARLY, in the idle gap right after
++     * the last picture before its deadline. Its emulation then finishes before
++     * the first picture that needs it, instead of making that picture late.
++     * The field's deadline (and the guest's timing) are unchanged. */
++    double sim_lead = paced_custom && presentation_hz > g_simulation_hz * 1.5
++        ? 0.9 / presentation_hz : 0;
++    if (paced_realtime && MonotonicSeconds() < video_clock.next_simulation - sim_lead) {
+       if (snes_host_clock_presentation_due(&video_clock, MonotonicSeconds())) {
+         if (paced_custom) {
+           double presented_at = MonotonicSeconds();
+           g_present_alpha = presentation_hz != g_simulation_hz
+               ? snes_host_clock_alpha(&video_clock, presented_at) : 1;
+-          DrawPpuFrameWithPerf();
++          if (g_emu.state) PresentInbetween(); else DrawPpuFrameWithPerf();
+           ++presentations;
+           /* Count deadlines at dispatch, not after the render/upload cost:
+            * crossing the next deadline while drawing does not consume it. */
+           snes_host_clock_presentation_done(&video_clock, presented_at);
+         }
+       }
+-      WaitUntil(paced_custom ? snes_host_clock_next_deadline(&video_clock)
+-                             : video_clock.next_simulation);
++      double sim_start = video_clock.next_simulation - sim_lead;
++      WaitUntil(!paced_custom ? video_clock.next_simulation
++                : video_clock.next_presentation < sim_start ? video_clock.next_presentation
++                                                            : sim_start);
+       continue;
+     }
+ 
++    EmuJoin();   /* gabbycat4 second core: from here on the guest is idle */
++
++    /* gabbycat4 smooth motion: a picture that is due together with the next
++     * field is shown BEFORE the field runs (alpha 1 = the end of the interval
++     * that just finished), so the field's emulation time never delays it.
++     * "Due" includes up to half a picture early: at an exact multiple of the
++     * field rate both deadlines coincide and rounding can put the picture's a
++     * hair after the field's. Without this, every field's first picture came
++     * 4-7 ms late and the next one early. */
++    if (paced_custom && !g_snes->disableRender && presentation_hz != g_simulation_hz &&
++        !snes_savestate_menu_is_open() && g_emu.state == 0 &&
++        video_clock.next_presentation <= MonotonicSeconds() + 0.5 / presentation_hz) {
++      double presented_at = MonotonicSeconds();
++      g_present_alpha = 1;
++      DrawPpuFrameWithPerf();
++      ++presentations;
++      snes_host_clock_presentation_done(&video_clock, presented_at);
++    }
++
+     /* Input-source assignments apply to each keyboard map independently. */
+     PollKeyboardControls(snesrecomp_sdl_get_keyboard_state());
+ 
+@@ -4536,6 +5248,11 @@ error_reading:;
        GameReset();
        continue;   /* guest was frozen: no frame to run or present */
      }
@@ -3439,7 +3700,7 @@ index d65335e..9bbb0dc 100644
      if (g_paused) continue;
      /* The script ticks HERE, after every path that can leave this iteration
       * without running a frame. Ticked above the overlay checks, an
-@@ -4548,7 +5046,7 @@ error_reading:;
+@@ -4548,7 +5265,7 @@ error_reading:;
        break;
      }
      inputs |= debug_server_get_controller_inputs();
@@ -3448,10 +3709,15 @@ index d65335e..9bbb0dc 100644
      double guest_start = MonotonicSeconds();
      PushExtraSeats();
      if (game->before_run_frame) game->before_run_frame();
-@@ -4562,6 +5060,14 @@ error_reading:;
+@@ -4560,9 +5277,24 @@ error_reading:;
+      * than a branch. Never during turbo: speculating about frames that are
+      * being skipped costs work for a picture nobody is reading. */
      bool runahead_captured = false;
++    uint32 emu_word = 0;
++    bool emu_threaded = false;
      {
        const uint32 word = inputs | GetActiveControllers() | debug_server_get_controller_active_mask();
+-      if (g_turbo || !snes_runahead_run_frame(word))
 +      if (InputTraceEnabled()) {
 +        static uint32 last_word = 0xFFFFFFFFu;
 +        if ((word & 0xFFFFFFu) != last_word) {
@@ -3460,10 +3726,70 @@ index d65335e..9bbb0dc 100644
 +          fflush(stderr);
 +        }
 +      }
-       if (g_turbo || !snes_runahead_run_frame(word))
++      emu_threaded = EmuWanted(paced_custom);
++      if (!emu_threaded) EmuDiscard();
++      emu_word = word;
++      if (emu_threaded && EmuTake()) {
++        /* The worker already ran this field (with the previous field's input). */
++      } else if (g_turbo || !snes_runahead_run_frame(word))
          RtlRunFrame(word);
        else
-@@ -4645,12 +5151,21 @@ error_reading:;
+         runahead_captured = true;   /* it rasterised the speculated frame */
+@@ -4620,10 +5352,45 @@ error_reading:;
+       bool keep_debt = game->keep_pacing_debt && game->keep_pacing_debt();
+       snes_host_clock_simulation_done(&video_clock, MonotonicSeconds(), keep_debt,
+                                       RtlLastFramePeriods());
++      /* gabbycat4 smooth motion: keep the picture grid locked to the field
++       * deadlines (one picture exactly at each field's deadline). The two
++       * clocks run at an exact multiple, but a slow field re-anchors the field
++       * deadline and left the pictures at a random offset: then one picture
++       * per field came early and the next late. Moves the grid by at most half
++       * a picture period. */
++      if (paced_custom && presentation_hz > g_simulation_hz * 1.5) {
++        double period = 1.0 / presentation_hz;
++        double ahead = (video_clock.next_simulation - video_clock.next_presentation) / period;
++        if (ahead > -64 && ahead < 64) {
++          long long whole = (long long)(ahead + (ahead >= 0 ? 0.5 : -0.5));
++          video_clock.next_presentation = video_clock.next_simulation - (double)whole * period;
++        }
++      }
+     }
+     else
+       snes_host_clock_reset(&video_clock, MonotonicSeconds(), g_simulation_hz, presentation_hz);
+-    if (!g_snes->disableRender &&
++    if (emu_threaded && !g_snes->disableRender) {
++      /* gabbycat4 second core: compose this field's verified base picture
++       * while the guest is idle (not shown), start the next field on the
++       * worker, then show pictures through PresentInbetween only. */
++      g_present_alpha = -1;
++      g_compose_only = true;
++      DrawPpuFrameWithPerf();
++      g_compose_only = false;
++      if (running && !(run_frames && frameCtr >= run_frames)) {
++        PushExtraSeats();
++        if (game->before_run_frame) game->before_run_frame();
++        if (!EmuStart(emu_word, paced_realtime && g_audio_device != 0))
++          host_report_breadcrumb("second core: worker unavailable, running inline");
++      }
++      if (snes_host_clock_presentation_due(&video_clock, MonotonicSeconds())) {
++        double presented_at = MonotonicSeconds();
++        g_present_alpha = snes_host_clock_alpha(&video_clock, presented_at);
++        PresentInbetween();
++        ++presentations;
++        snes_host_clock_presentation_done(&video_clock, presented_at);
++      }
++    } else if (!g_snes->disableRender &&
+         (!paced_custom || snes_host_clock_presentation_due(&video_clock, MonotonicSeconds()) ||
+          (run_frames && frameCtr >= run_frames))) {
+       double presented_at = MonotonicSeconds();
+@@ -4639,18 +5406,28 @@ error_reading:;
+     }
+   }
+ 
++  EmuStop();   /* gabbycat4 second core */
+   const double run_end = MonotonicSeconds();
+   const double run_cpu_end = ProcessCpuSeconds();
+   if (state_trace) fclose(state_trace);
    if (g_frame_timings) {
      FILE *f = fopen(frame_timing_path, "w");
      if (f) {
@@ -3487,7 +3813,7 @@ index d65335e..9bbb0dc 100644
        }
        fclose(f);
      } else {
-@@ -4764,11 +5279,11 @@ error_reading:;
+@@ -4764,11 +5541,11 @@ error_reading:;
  static void PollKeyboardControls(const uint8_t *keys) {
    /* Replace the whole keyboard word so changing a seat to Gamepad/None also
     * releases keys held under its previous assignment. Hotkeys remain separate. */
@@ -3502,7 +3828,7 @@ index d65335e..9bbb0dc 100644
          ? keybinds_read_player_runner(keys, seat + 1) : 0;
  }
  
-@@ -4823,8 +5338,7 @@ static void HandleCommand(uint32 j, bool pressed) {
+@@ -4823,8 +5600,7 @@ static void HandleCommand(uint32 j, bool pressed) {
    if (!pressed)
      return;
    if (j <= kKeys_Load_Last) {
@@ -3512,7 +3838,7 @@ index d65335e..9bbb0dc 100644
    } else if (j <= kKeys_Save_Last) {
      RtlSaveLoad(kSaveLoad_Save, j - kKeys_Save);
    } else {
-@@ -4892,7 +5406,12 @@ static void HandleCommand(uint32 j, bool pressed) {
+@@ -4892,7 +5668,12 @@ static void HandleCommand(uint32 j, bool pressed) {
  }
  
  static void HandleInput(int keyCode, int keyMod, bool pressed) {
@@ -3525,7 +3851,7 @@ index d65335e..9bbb0dc 100644
    if (j != 0)
      HandleCommand(j, pressed);
  }
-@@ -4918,8 +5437,8 @@ static void RequestScreenshot(void) {
+@@ -4918,8 +5699,8 @@ static void RequestScreenshot(void) {
  
  static uint32 GetActiveControllers(void) {
    uint32 ctrl = g_script_controllers |
@@ -3536,7 +3862,7 @@ index d65335e..9bbb0dc 100644
    ctrl |= g_gamepad[0].joystick_id != -1 ? 1 : 0;
    ctrl |= g_gamepad[1].joystick_id != -1 ? 2 : 0;
    return ctrl << 30;
-@@ -5080,6 +5599,11 @@ static void HandleGamepadInput(GamepadInfo *gi, int button, bool pressed) {
+@@ -5080,6 +5861,11 @@ static void HandleGamepadInput(GamepadInfo *gi, int button, bool pressed) {
    if (!!(gi->modifiers & (1 << button)) == pressed)
      return;
    gi->modifiers ^= 1 << button;
@@ -3548,7 +3874,7 @@ index d65335e..9bbb0dc 100644
    if (pressed)
      gi->last_cmd[button] = FindCmdForGamepadButton(button + gi->index * kGamepadBtn_Count, gi->modifiers);
    if (gi->last_cmd[button] != 0)
-@@ -5104,6 +5628,14 @@ static void HandleVolumeAdjustment(int volume_adjustment) {
+@@ -5104,6 +5890,14 @@ static void HandleVolumeAdjustment(int volume_adjustment) {
    snes_osd_note_volume(g_config.volume);
  }
  
@@ -3564,7 +3890,7 @@ index d65335e..9bbb0dc 100644
  // with a maximum error of 0.1620 degrees
  // normalized_atan(x) ~ (b x + x^2) / (1 + 2 b x + x^2)
 diff --git a/runner/src/desktop/host_main.h b/runner/src/desktop/host_main.h
-index e832422..73c099a 100644
+index e8324228..b97a9879 100644
 --- a/runner/src/desktop/host_main.h
 +++ b/runner/src/desktop/host_main.h
 @@ -52,6 +52,7 @@ struct SpcPlayer;
@@ -3575,7 +3901,27 @@ index e832422..73c099a 100644
  
  /* Per-frame numbers a game's after_run_frame hook may want. Wall-clock
   * figures are diagnostics only; nothing here samples or changes guest state. */
-@@ -223,6 +224,29 @@ typedef struct SnesDesktopHostGame {
+@@ -150,6 +151,19 @@ typedef struct SnesDesktopHostGame {
+    * refresh rate, or 0 when the host only asks whether decoupling is wanted
+    * (before a window exists). */
+   double (*presentation_hz)(double display_refresh);
++  /* gabbycat4 smooth motion (second core). Optional.
++   * emulation_thread: nonzero = with decoupled presentation, run the guest's
++   * next field on a worker thread (input reaches the guest one field later).
++   * draw_inbetween: draw one picture of the current field while the guest
++   * may be running; must read no guest state (frozen data and `field`, the
++   * last captured PPU field, only). Return 0 to show the last composed
++   * picture again. alpha is the host's interpolation weight. */
++  int (*emulation_thread)(void);
++  int (*draw_inbetween)(uint8_t *dst, size_t pitch, const uint8_t *field,
++                        int frame_w, int frame_h, double alpha);
++  /* Optional: place the calling thread (0 = main, before the worker starts;
++   * 1 = the guest worker, at its top) on suitable CPUs. */
++  void (*pin_thread)(int role);
+   /* Window size at scale 1 for a frame of this width (default: 4:3 on 224). */
+   int (*window_base_width)(int frame_w);
+   int (*window_base_height)(void);
+@@ -223,6 +237,29 @@ typedef struct SnesDesktopHostGame {
     * raster-state capture. The host owns this writable surface. A separate
     * draw_frame may retain a wider image for presentation. */
    void (*publish_native_field)(uint8_t *field, unsigned number);
@@ -3605,7 +3951,7 @@ index e832422..73c099a 100644
  } SnesDesktopHostGame;
  
  /* The whole program. Returns the process exit code. */
-@@ -237,6 +261,8 @@ void snesrecomp_desktop_set_widescreen(int enabled);
+@@ -237,6 +274,8 @@ void snesrecomp_desktop_set_widescreen(int enabled);
   * this also updates the live config; it does not write the user's file. */
  int snesrecomp_desktop_new_renderer(void);
  void snesrecomp_desktop_set_new_renderer(int enabled);

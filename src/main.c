@@ -59,6 +59,7 @@
 #include "lagoon_boss_hud.h"
 #include "lagoon_motion_log.h"   /* gabbycat4: LAGOON_MOTION_LOG / LAGOON_OAM_LOG */
 #include "lagoon_smooth.h"       /* gabbycat4: PicturesPerSecond */
+#include "lagoon_affinity.h"     /* gabbycat4: second-core thread pinning */
 #include "snes/interp_bridge.h"
 #include "snes/ppu.h"
 #include "config.h"
@@ -507,6 +508,7 @@ static int LagoonHost_MapKey(int key,int modifiers,int pressed) {
 }
 
 static int LagoonHost_DrawFrame(uint8_t *dst,size_t pitch,const uint8_t *field,int width,int height,double alpha) {
+    LagoonSmooth_BeginPicture(alpha);
     if(!LagoonWide_DrawFrame(dst,pitch,field,width,height,alpha))
         for(int y=0;y<height;y++)memcpy(dst+(size_t)y*pitch,field+(size_t)y*width*4,(size_t)width*4);
     LagoonBossHud_Draw(dst,pitch,field,(size_t)width*4,(unsigned)width,(unsigned)height,RtlStateGeneration());
@@ -517,6 +519,7 @@ static void LagoonHost_PresentationCompose(uint8_t *dst,size_t pitch,int width,i
     LagoonWide_PresentationCompose(dst,pitch,width,height,src,sp,sw,sh);
     int left=(width-256)/2,top=0;
     int placed=(width!=sw||height!=sh)&&LagoonSceneRenderer_ViewPlacement(width,height,RtlStateGeneration(),&left,&top);
+    if(!placed){int sx,sy;LagoonSmooth_LastShift(&sx,&sy);left-=sx;top-=sy;} /* gabbycat4: cameo moves with the smoothed camera */
     if(!present("LAGOON_EASTER_EGG_DISABLE")&&(placed||(width==sw&&height==sh)))
         LagoonEasterEgg_DrawView(dst,pitch,width,height,SDL_GetTicks(),RtlStateGeneration(),left,top);
     /* An opt-in dialogue fixture runs AFTER visibility was published, just
@@ -536,6 +539,22 @@ static void LagoonHost_PresentationCompose(uint8_t *dst,size_t pitch,int width,i
     }
 }
 
+/* gabbycat4 second core: one in-between picture from frozen data only (the
+ * guest may be running on the worker): the scene, then what the normal path
+ * draws over it -- boss HUD, the cameo (moved with the camera), the toast. */
+static int LagoonHost_DrawInbetween(uint8_t *dst,size_t pitch,const uint8_t *field,int width,int height,double alpha){
+    int sx=0,sy=0;
+    if(!LagoonSmooth_DrawInbetween(dst,pitch,(unsigned)width,(unsigned)height,alpha,&sx,&sy))return 0;
+    LagoonBossHud_Draw(dst,pitch,field,(size_t)width*4,(unsigned)width,(unsigned)height,RtlStateGeneration());
+    if(!present("LAGOON_EASTER_EGG_DISABLE"))
+        LagoonEasterEgg_DrawView(dst,pitch,(unsigned)width,(unsigned)height,SDL_GetTicks(),RtlStateGeneration(),(width-256)/2-sx,-sy);
+    const uint32_t *image;int iw,ih;
+    if(LagoonAchievementUI_ToastImage(&image,&iw,&ih)&&iw<=width&&ih<=height){
+        int x=width-iw-4,y=4;if(x<0)x=0;
+        for(int row=0;row<ih;row++)memcpy(dst+(size_t)(y+row)*pitch+(size_t)x*4,image+(size_t)row*iw,(size_t)iw*4);
+    }
+    return 1;
+}
 static void LagoonHost_EndFrame(const uint8_t *field,unsigned number) {
     LagoonWide_EndFrame(field,number);LagoonEasterEgg_EndFrame(RtlStateGeneration());
     LagoonBossHud_ObserveField(g_ppu,g_ram,RtlStateGeneration(),number,g_snesrecomp_last_hdmaen);
@@ -596,6 +615,9 @@ static const SnesDesktopHostGame kGameHost = {
     .presentation_geometry = LagoonWide_PresentationGeometry,
     .presentation_compose = LagoonHost_PresentationCompose,
     .presentation_hz     = LagoonSmooth_PresentationHz,
+    .emulation_thread    = LagoonSmooth_SecondCore,
+    .draw_inbetween      = LagoonHost_DrawInbetween,
+    .pin_thread          = LagoonAffinity_Pin,
 #ifdef _WIN32
     .create_renderer = LagoonD3D11_Create,
     .renderer_title_ui = LagoonD3D11_TitleUi,

@@ -57,6 +57,9 @@ typedef struct State {
 } State;
 
 static unsigned s_pps = 60;
+static int s_second_core = 1;           /* [Lagoon] SecondCore, LAGOON_SECOND_CORE */
+static int s_base_ok, s_calm, s_last_shift_x, s_last_shift_y;
+static unsigned s_base_width;
 static Record s_ring[kRing];
 static Record s_rec_to;
 static State s_from, s_to;
@@ -86,6 +89,7 @@ static void read_ini(const char *path) {
     size_t n = strlen(name);
     while (n && isspace((unsigned char)name[n - 1])) name[--n] = 0;
     if (!strcmp(name, "PicturesPerSecond")) s_pps = valid_pps(strtol(value, NULL, 10));
+    if (!strcmp(name, "SecondCore")) s_second_core = strtol(value, NULL, 10) != 0;
   }
   fclose(f);
 }
@@ -100,10 +104,13 @@ static void report(void) {
 void LagoonSmooth_AfterConfig(const char *config_path) {
   static int once;
   s_pps = 60;
+  s_second_core = 1;
   read_ini(config_path);
   read_ini("config.local.ini");
   const char *env = getenv("LAGOON_PICTURES");
   if (env && *env) s_pps = valid_pps(strtol(env, NULL, 10));
+  const char *core = getenv("LAGOON_SECOND_CORE");
+  if (core && *core) s_second_core = strtol(core, NULL, 10) != 0;
   if (!once) {
     once = 1;
     const char *path = getenv("LAGOON_SMOOTH_LOG");
@@ -118,11 +125,22 @@ void LagoonSmooth_AfterConfig(const char *config_path) {
 
 void LagoonSmooth_Reset(void) {
   s_have_to = s_have_from = s_have_pkt_from = s_checked = s_rendered_valid = 0;
+  s_base_ok = 0;
   s_period = 2;
   memset(s_ring, 0, sizeof s_ring);
 }
 
 unsigned LagoonSmooth_PicturesPerSecond(void) { return s_pps; }
+int LagoonSmooth_SecondCore(void) { return s_pps > 60 && s_second_core; }
+void LagoonSmooth_BeginPicture(double alpha) {
+  s_last_shift_x = s_last_shift_y = 0;
+  if (alpha < 0) s_base_ok = 0;
+}
+void LagoonSmooth_SetCalm(int calm) { s_calm = calm != 0; }
+void LagoonSmooth_LastShift(int *x, int *y) {
+  if (x) *x = s_last_shift_x;
+  if (y) *y = s_last_shift_y;
+}
 
 double LagoonSmooth_PresentationHz(double display_refresh) {
   (void)display_refresh;
@@ -419,6 +437,13 @@ void LagoonSmooth_Draw(uint8_t *dst, size_t pitch, unsigned width, unsigned heig
     return;
   }
   if (!s_have_to || s_cur.serial != s_pkt.serial) { new_packet(dst, pitch, width); s_picture_in_field = 0; }
+  if (alpha < 0) {
+    /* Second core: the field's base picture (composed, verified, not shown).
+     * Its pictures come later through LagoonSmooth_DrawInbetween. */
+    s_base_ok = s_calm && s_have_to && s_have_from && s_checked > 0;
+    s_base_width = width;
+    return;
+  }
   ++s_picture_in_field;
   if (!s_have_to) { log_line(s_cur.frame, alpha, 1, 0, "no-record"); return; }
   if (!s_have_from) { log_line(s_pkt.frame, alpha, 1, 0, "still"); return; }
@@ -440,5 +465,36 @@ void LagoonSmooth_Draw(uint8_t *dst, size_t pitch, unsigned width, unsigned heig
   for (unsigned y = 0; y < kHeight; ++y)
     memcpy(dst + (size_t)y * pitch, s_buf + (size_t)y * width, (size_t)width * 4);
   ++s_drawn;
+  s_last_shift_x = s_pos.wx - s_pkt.wx; s_last_shift_y = s_pos.wy - s_pkt.wy;
   log_line(s_pkt.frame, alpha, t, 1, "inbetween");
+}
+
+int LagoonSmooth_DrawInbetween(uint8_t *dst, size_t pitch, unsigned width, unsigned height,
+                               double alpha, int *shift_x, int *shift_y) {
+  /* Second core: called while the guest may be running. Reads only this
+   * module's state and the scene renderer's completed packet, both written
+   * on the main thread while the guest was idle. */
+  *shift_x = *shift_y = 0;
+  if (s_pps <= 60 || !dst || !s_base_ok || height != kHeight || width != s_base_width) {
+    log_line(s_pkt.frame, alpha, 1, 0, "hold");
+    return 0;
+  }
+  ++s_picture_in_field;
+  double t = current_t(alpha);
+  if (!positions_at(t, &s_pos)) { log_line(s_pkt.frame, alpha, t, 0, "jump"); return 0; }
+  if (!s_rendered_valid || s_rendered_width != width || !same_draw(&s_rendered, &s_pos)) {
+    ++s_renders;
+    if (!LagoonSceneRenderer_RenderMotion(s_buf, width, &s_pos)) {
+      s_rendered_valid = 0;
+      log_line(s_pkt.frame, alpha, t, 0, "render-refused");
+      return 0;
+    }
+    s_rendered = s_pos; s_rendered_width = width; s_rendered_valid = 1;
+  }
+  for (unsigned y = 0; y < kHeight; ++y)
+    memcpy(dst + (size_t)y * pitch, s_buf + (size_t)y * width, (size_t)width * 4);
+  ++s_drawn;
+  *shift_x = s_pos.wx - s_pkt.wx; *shift_y = s_pos.wy - s_pkt.wy;
+  log_line(s_pkt.frame, alpha, t, 1, "inbetween-2nd-core");
+  return 1;
 }

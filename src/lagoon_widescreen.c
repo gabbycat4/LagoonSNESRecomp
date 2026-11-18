@@ -924,7 +924,10 @@ int LagoonWide_DrawFrame(uint8_t *dst,size_t pitch,const uint8_t *field,
     return 1;
   }
   /* gabbycat4: in-between pictures, only over a verified world picture at zoom 1x. */
-  if(scene_replaced&&s_zoom==100)LagoonSmooth_Draw(dst,pitch,(unsigned)width,(unsigned)height,alpha);
+  if(scene_replaced&&s_zoom==100){
+    LagoonSmooth_SetCalm(g_ppu&&g_ppu->inidisp==15&&!g_ram[0x100e]&&!LagoonSceneRenderer_GameOver(g_ram,g_rom,0x100000));
+    LagoonSmooth_Draw(dst,pitch,(unsigned)width,(unsigned)height,alpha);
+  }
   /* Loader uploads can invalidate the exact world packet halfway through a
    * field. Keep one coherent full-width outgoing canvas during that interval,
    * using the real fade brightness. Incoming world output still needs every

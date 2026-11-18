@@ -111,6 +111,7 @@ add_executable(LagoonSNESRecomp
     src/lagoon_boss_hud.c
     src/lagoon_motion_log.c
     src/lagoon_smooth.c
+    src/lagoon_affinity.c
     src/lagoon_wide_multipart.c
     src/lagoon_wide_spell3.c
     src/lagoon_scene_renderer.c
