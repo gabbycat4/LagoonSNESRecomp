@@ -103,4 +103,7 @@ int LagoonSceneRenderer_RenderMotion(uint32_t *out, unsigned width, const Lagoon
 /* The same at double resolution (2*width x 448, pitch 2*width*4) with the
  * half-pixel offsets in pos. width <= 512. The HUD layer (BG3) is not moved. */
 int LagoonSceneRenderer_RenderMotion2x(uint32_t *out, unsigned width, const LagoonSceneMotion *pos);
+/* 1 while half-pixel pictures are on: the verified render shares their
+ * per-field background cache (decoded once a field). */
+void LagoonSceneRenderer_SetMotionCache(int on);
 #endif

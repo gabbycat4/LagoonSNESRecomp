@@ -1,4 +1,4 @@
-# Lagoon Step 4.7, round 3: L2/R2 trigger safety (then commit)
+# Lagoon Step 4.7, round 4b: their picture and ours share one background decode
 # Every line is a fish comment or a command, so a whole block can be pasted.
 # Logs land in build-port/. Tell Claude "done" after each run.
 
@@ -14,3 +14,8 @@ cd ~/Projects/LagoonSNESRecomp
 env LAGOON_SMOOTH_LOG=smooth.log SNESRECOMP_FRAME_TIMING=timing.csv SNESRECOMP_HOST_PROFILE=1 mangohud ./build-port/LagoonSNESRecomp --no-launcher --rom lagoon.sfc 2> profile.txt
 
 # --- 3. Tell Claude "done": town smoothness, and whether you played with the controller or keys. ---
+
+# --- 4. Commit when it feels at least as good as before ---
+cd ~/Projects/LagoonSNESRecomp
+git --no-optional-locks add src/lagoon_scene_renderer.c src/lagoon_scene_renderer.h src/lagoon_smooth.c tools/smooth-tests notes.txt STEPS.txt
+git --no-optional-locks commit -m "Town: share the per-field background cache with the verified render"

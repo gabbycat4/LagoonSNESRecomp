@@ -148,6 +148,7 @@ int LagoonSmooth_HalfPixels(int source_w, int source_h) {
 }
 void LagoonSmooth_BeginPicture(double alpha) {
   s_last_shift_x = s_last_shift_y = 0;
+  LagoonSceneRenderer_SetMotionCache(s_pps > 60 && s_second_core && s_half_pixels);
   if (alpha < 0) s_base_ok = 0;
 }
 void LagoonSmooth_SetCalm(int calm) { s_calm = calm != 0; }

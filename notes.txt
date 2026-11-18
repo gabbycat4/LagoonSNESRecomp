@@ -363,3 +363,29 @@ SAFETY FIX (round 3): trigger axes become L2/R2 presses in HandleGamepadAxisInpu
 HandleGamepadInput (title hook: map/options read guest memory; host commands). Axis events were in
 the harmless list. Now EmuTriggerChanges: an axis event joins only when a trigger crosses its press
 threshold (hysteresis 12000/16000 as the host); sticks and trigger wobble still never join.
+
+Step 4.7 round 3 result: L2/R2 trigger joins work (8 axis-event joins = 4 pulls); joins that waited
+29, all for presses. Town 4.6% late (incl. map/options opening), mostly the first picture after
+each field: capture 1.1 + base 1.2 + half-pixel picture ~2 ms > the ~5 ms lead in busy spots,
+in runs of consecutive fields (not the once-a-second self-check).
+Round 4 (town tuning, lagoon_scene_renderer.c only; offline timings on this machine):
+- 2x drawing profiled: backgrounds dominate (0.9 ms of decode per picture).
+- BG3 HUD line decoded once per 1x row; finite-room blanking once per row.
+- Sprites: one graphics_row lookup per 8-pixel tile row (no measurable gain, kept).
+- Background cache: the packet's backgrounds decoded once per field at 1x with an 8 px margin
+  (s_motion_render == 3 = cache build: native = exactly the field's own window); each in-between
+  picture reads its window. Not for parallax rooms (BG2 moves at its own rate).
+  First picture of a field 2.06 -> 2.01 ms (incl. the build), the others 2.06 -> 1.17 ms;
+  3 pictures 6.2 -> 4.4 ms. t2x/t2h/t2v still PASS (exact). tools/smooth-tests/tperf.c.
+
+Round 4b (town, shared cache)
+- VSync question: with smoothing on, VSyncInterval() returns 0, so driver VSync is already off;
+  swap time mean 0.42 ms in the user's log. Not the cause of town slowdown. KDE Adaptive sync: Always.
+- Town late pictures are the first one after each game frame: capture + their verified render +
+  first half-pixel picture run ~7 ms against a 5.5 ms window in busy spots.
+- Their verified render_into now reads the same per-field background cache (s_motion_cache_on,
+  set from LagoonSmooth_BeginPicture when 180/s + second core + half pixels; not mosaic,
+  not parallax, width <= 512). Background decoded once per field instead of twice.
+- t1c PASS: identical output with and without the shared cache on 40 random scenes.
+  tchain (synthetic): verified render + first picture 2.88 -> 2.76 ms. Real town gain should be
+  larger (real maps repeat less work than random noise hides); needs a play log to confirm.

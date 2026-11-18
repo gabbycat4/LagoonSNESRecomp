@@ -64,6 +64,8 @@ static unsigned s_build,s_complete=1,s_serial,s_cache_serial,s_cache_width;
 static int s_mode=2;
 static int s_motion_render; /* gabbycat4: 1 = in-between redraw (no cache), 2 = same with room-map backgrounds only */
 static int s_motion_wx0,s_motion_wy0; /* gabbycat4: the packet's own world origin during a redraw */
+static int s_motion_cache_on; /* gabbycat4: the verified render reads the half-pixel background cache */
+static void bg_cache_ensure(const ScenePacket *s,unsigned width);
 static int s_edge_clip=1;
 static char s_report[2048];
 static const char *s_status="reset";
@@ -698,16 +700,23 @@ static void background_row_extent(const ScenePacket *s,unsigned width,int y,int 
    * inside the world area the original field actually showed; columns/rows it
    * did not show may not be streamed yet (garbage at the leading edge), so
    * they come from the room map like the widescreen margins. */
-  int native_lo=left,native_hi=left+256,rows_ok=1;
-  if(s_motion_render==1){
+  int native_lo=left,native_hi=left+256,rows_ok=1,picture_rows=y>=0&&y<native_height;
+  if(s_motion_render==1||s_motion_render==3){
     int shift=s_motion_wx0-s->wx;
-    if(left+shift>native_lo)native_lo=left+shift;
-    if(left+shift+256<native_hi)native_hi=left+shift+256;
+    if(s_motion_render==3) {
+      /* background cache build: exactly the world area the field showed,
+       * not clipped to this (margin-padded) buffer's own centre */
+      native_lo=left+shift;native_hi=left+shift+256;picture_rows=1;
+    } else {
+      if(left+shift>native_lo)native_lo=left+shift;
+      if(left+shift+256<native_hi)native_hi=left+shift+256;
+    }
+    if(native_lo<0)native_lo=0;
     if(native_hi<native_lo)native_hi=native_lo;
     rows_ok=s->wy+y>=s_motion_wy0&&s->wy+y<s_motion_wy0+native_height;
   }
   for(unsigned x=0;x<width;) {
-    int native=(int)x>=native_lo&&(int)x<native_hi&&rows_ok&&y>=0&&y<native_height;
+    int native=(int)x>=native_lo&&(int)x<native_hi&&rows_ok&&picture_rows;
     int static_bg2=s->parallax&&layer==1;
     int qx=static_bg2?(int)s->bg2_x+(int)x-left:
       native?(int)s->native_x+(int)x-left:s->wx+(int)x-left;
@@ -812,11 +821,56 @@ static void remember_background(const ScenePacket *s,unsigned width) {
   b->mosaic_y_phase=s->mosaic_y_phase;b->mosaic_backend=s->mosaic_backend;b->mosaic_y_size=s->mosaic_y_size;
   b->valid=1; /* Input key only until a second matching render needs these BGs. */
 }
+/* gabbycat4 half-pixel drawing: the packet's backgrounds decoded ONCE (1x,
+ * with a BGC_M margin on every side) for all in-between pictures of a field;
+ * the pictures differ only by camera position, so each reads its window. */
+enum { BGC_M = 8, BGC_W = W + 2*BGC_M + 1, BGC_H = H + 2*BGC_M + 1 };
+static struct {
+  unsigned serial,width,valid;int ref_x,ref_y,bg2_x,bg2_y;uint64_t generation;
+  uint8_t depth[BGC_W*BGC_H];uint16_t color[BGC_W*BGC_H];
+} s_bgc;
+static unsigned s_bgc_builds,s_bgc_hits;
+static void bg_cache_build(ScenePacket *s,unsigned width,int bg2_x,int bg2_y) {
+  /* s is the packet at its own positions; decode world rows/columns
+   * [ref-M, ref+width+M] x [ref-M, ref+H+M] with the same rules as a redraw. */
+  int left=(int)(width-256)/2;
+  int wx=s->wx,wy=s->wy;unsigned nx=s->native_x,ny=s->native_y,bx=s->bg2_x,by=s->bg2_y;
+  s->wx=wx-BGC_M;s->native_x=nx-BGC_M;s->bg2_x=(unsigned)bg2_x;s->bg2_y=(unsigned)bg2_y;
+  unsigned bw=width+2*BGC_M+1;
+  for(int r=0;r<BGC_H;++r) {
+    int y=r-BGC_M;
+    uint8_t *d=s_bgc.depth+(size_t)r*BGC_W;uint16_t *c=s_bgc.color+(size_t)r*BGC_W;
+    memset(d,0,bw);for(unsigned x=0;x<bw;++x)c[x]=s->pal[0];
+    background_row(s,bw,y,left,0,d,c);
+    background_row(s,bw,y,left,1,d,c);
+  }
+  s->wx=wx;s->wy=wy;s->native_x=nx;s->native_y=ny;s->bg2_x=bx;s->bg2_y=by;
+  s_bgc.serial=s->serial;s_bgc.generation=s->generation;s_bgc.width=width;
+  s_bgc.ref_x=wx;s_bgc.ref_y=wy;s_bgc.bg2_x=bg2_x;s_bgc.bg2_y=bg2_y;s_bgc.valid=1;++s_bgc_builds;
+}
+
+static void bg_cache_ensure(const ScenePacket *cs,unsigned width) {
+  ScenePacket *s=(ScenePacket *)cs;   /* bg_cache_build restores every field it moves */
+  if(s_bgc.valid&&s_bgc.serial==s->serial&&s_bgc.generation==s->generation&&s_bgc.width==width&&
+     s_bgc.ref_x==s->wx&&s_bgc.ref_y==s->wy&&s_bgc.bg2_x==(int)s->bg2_x&&s_bgc.bg2_y==(int)s->bg2_y)return;
+  int saved=s_motion_render,wx0=s_motion_wx0,wy0=s_motion_wy0;
+  s_motion_wx0=s->wx;s_motion_wy0=s->wy;s_motion_render=3;
+  bg_cache_build(s,width,(int)s->bg2_x,(int)s->bg2_y);
+  s_motion_render=saved;s_motion_wx0=wx0;s_motion_wy0=wy0;
+}
+void LagoonSceneRenderer_SetMotionCache(int on){s_motion_cache_on=on!=0;}
+
 static void render_into(const ScenePacket *s,unsigned width,uint32_t *pixels,int skip_cloud) {
   int left=(int)(width-256)/2;
   int background_match=!s_motion_render&&same_background(s,width);
   int reuse_background=background_match&&s_background.valid==2;
   if(reuse_background)++s_background_reuses;else ++s_background_builds;
+  /* gabbycat4: with half-pixel pictures on, the verified picture takes its
+   * backgrounds from the per-field cache the in-between pictures use, so they
+   * are decoded once a field, not twice. The verification below (equality
+   * with the PPU field) then also checks the cache. */
+  int motion_cache=!s_motion_render&&s_motion_cache_on&&!s->incoming_mosaic&&!s->parallax&&width<=512;
+  if(motion_cache)bg_cache_ensure(s,width);
   for(unsigned y=0;y<H;++y) {
     uint64_t rank[W];uint16_t obj[W];uint8_t priority[W];
     for(unsigned x=0;x<width;++x){rank[x]=UINT64_MAX;priority[x]=0;obj[x]=0;}
@@ -849,7 +903,10 @@ static void render_into(const ScenePacket *s,unsigned width,uint32_t *pixels,int
       }
     }
     uint8_t depth[W];uint16_t colors[W];
-    if(reuse_background) {
+    if(motion_cache) {
+      memcpy(depth,s_bgc.depth+(size_t)(y+BGC_M)*BGC_W+BGC_M,width);
+      memcpy(colors,s_bgc.color+(size_t)(y+BGC_M)*BGC_W+BGC_M,width*sizeof(*colors));
+    } else if(reuse_background) {
       memcpy(depth,s_background.depth+y*width,width);
       memcpy(colors,s_background.colors+y*width,width*sizeof(*colors));
     } else {
@@ -1002,10 +1059,21 @@ static void render_into_2x(const ScenePacket *s,unsigned width,uint32_t *out,con
   int hbx=pos->half_bg&1,hby=(pos->half_bg>>1)&1;
   static uint8_t bdepth[W+8];static uint16_t bcol[W+8];
   static uint64_t rank[2*W];static uint16_t obj[2*W];static uint8_t prio[2*W];
-  int cached=-1;
+  static uint8_t hud_z[256],blank[W+8];static uint16_t hud_c[256];
+  int cached=-1,hud_cached=-1,out_cached=-1;
+  /* camera offset of this picture against the cached backgrounds */
+  int cx=s->wx-s_bgc.ref_x,cy=s->wy-s_bgc.ref_y;
+  int use_cache=!s->parallax&&s_motion_render==1&&s_bgc.valid&&s_bgc.serial==s->serial&&s_bgc.generation==s->generation&&
+    s_bgc.width==width&&s_bgc.bg2_x==(int)s->bg2_x&&s_bgc.bg2_y==(int)s->bg2_y&&
+    cx>=-BGC_M&&cx<=BGC_M&&cy>=-BGC_M&&cy<=BGC_M;
+  if(use_cache)++s_bgc_hits;
   for(unsigned Y=0;Y<2*H;++Y) {
     int y=((int)Y+hby)>>1;               /* source background row */
-    if(y!=cached) {
+    const uint8_t *bd=bdepth;const uint16_t *bc=bcol;
+    if(use_cache) {
+      size_t at=(size_t)(y+cy+BGC_M)*BGC_W+(size_t)(cx+BGC_M);
+      bd=s_bgc.depth+at;bc=s_bgc.color+at;
+    } else if(y!=cached) {
       memset(bdepth,0,width+1);
       for(unsigned x=0;x<=width;++x)bcol[x]=s->pal[0];
       background_row(s,width+1,y,left,0,bdepth,bcol);
@@ -1022,14 +1090,24 @@ static void render_into_2x(const ScenePacket *s,unsigned width,uint32_t *out,con
       unsigned dy=dyh>>1;
       int ox=s->policy.x[slot];
       unsigned tile=o[2]|o[3]<<8,sy=(tile&0x8000)?n-1-dy:dy;
-      for(unsigned dxh=0;dxh<2*n;++dxh) {
-        int nx2=2*ox+hx+(int)dxh,X=2*left+nx2;
-        if((nx2<0&&s->policy.clip_left[slot])||X<0||X>=(int)W2)continue;
-        uint64_t order=(uint64_t)slot<<32;if(order>=rank[X])continue;
-        unsigned dx=dxh>>1,sx=(tile&0x4000)?n-1-dx:dx;
-        unsigned ch=(((((tile&255)>>4)+(sy>>3))<<4)|(((tile&15)+(sx>>3))&15));
-        unsigned c=graphics(s,ch,sx&7,sy&7,(tile&0x100)?0x5000:0x4000,4);
-        if(c){rank[X]=order;prio[X]=2+4*((tile>>12)&3);obj[X]=s->pal[128+((tile>>9)&7)*16+c];}
+      unsigned base=(tile&0x100)?0x5000:0x4000,pal=128+((tile>>9)&7)*16;
+      uint8_t pr=(uint8_t)(2+4*((tile>>12)&3));
+      uint64_t order=(uint64_t)slot<<32,bits=0;
+      unsigned cached_col=~0u;
+      for(unsigned dx=0;dx<n;++dx) {
+        unsigned sx=(tile&0x4000)?n-1-dx:dx;
+        if((sx>>3)!=cached_col) {   /* one 8-pixel tile row per lookup */
+          cached_col=sx>>3;
+          unsigned ch=(((((tile&255)>>4)+(sy>>3))<<4)|(((tile&15)+cached_col)&15));
+          bits=graphics_row(s,ch,sy&7,base,4);
+        }
+        unsigned c=(unsigned)(bits>>((sx&7)*8))&255;
+        if(!c)continue;
+        for(int h=0;h<2;++h) {
+          int nx2=2*ox+hx+2*(int)dx+h,X=2*left+nx2;
+          if((nx2<0&&s->policy.clip_left[slot])||X<0||X>=(int)W2||order>=rank[X])continue;
+          rank[X]=order;prio[X]=pr;obj[X]=s->pal[pal+c];
+        }
       }
     }
     for(unsigned i=0;i<s->count;++i) {
@@ -1045,20 +1123,32 @@ static void render_into_2x(const ScenePacket *s,unsigned width,uint32_t *out,con
     }
     uint32_t *row=out+(size_t)Y*W2;
     unsigned yy=(Y>>1)+1;
+    if((int)yy!=hud_cached) {
+      /* BG3 (the HUD) never moves: decode its line once per 1x row. */
+      for(unsigned hx=0;hx<256;++hx) {
+        unsigned tile=s->vram[0x3c00+(yy/8)*32+hx/8];
+        unsigned c=graphics(s,tile,hx&7,yy&7,0x6000,2);
+        hud_z[hx]=(uint8_t)(c?((tile&0x2000)?15:1):0);
+        hud_c[hx]=c?s->pal[((tile>>10)&7)*4+c]:0;
+      }
+      hud_cached=(int)yy;
+    }
+    if(y!=out_cached) {
+      /* finite rooms: which 1x background columns lie outside the room */
+      for(unsigned x=0;x<=width;++x)
+        blank[x]=(uint8_t)((s->parallax||s->finite_clip)&&((int)x<left||(int)x>=left+256)&&
+          (s->wx+(int)x-left<0||s->wx+(int)x-left>=s->world_width||
+           s->wy+y<0||s->wy+y>=s->world_height));
+      out_cached=y;
+    }
     for(unsigned X=0;X<W2;++X) {
       unsigned x=(X+(unsigned)hbx)>>1;          /* source background column */
-      uint8_t depth=bdepth[x];uint16_t color=bcol[x];
+      if(blank[x]){row[X]=0;continue;}
+      uint8_t depth=bd[x];uint16_t color=bc[x];
       if(prio[X]>depth){depth=prio[X];color=obj[X];}
       int hx=(int)(X>>1)-left;                  /* BG3 HUD column, not shifted */
-      if(hx>=0&&hx<256) {
-        unsigned tile=s->vram[0x3c00+(yy/8)*32+(unsigned)hx/8],palette=((tile>>10)&7)*4,pz=(tile&0x2000)?15:1;
-        unsigned c=graphics(s,tile,(unsigned)hx&7,yy&7,0x6000,2);   /* graphics() mirrors flipped tiles */
-        if(c&&pz>depth)color=s->pal[palette+c];
-      }
-      int outside=(s->parallax||s->finite_clip)&&((int)x<left||(int)x>=left+256)&&
-        (s->wx+(int)x-left<0||s->wx+(int)x-left>=s->world_width||
-         s->wy+y<0||s->wy+y>=s->world_height);
-      row[X]=outside?0:s_rgb15[color&32767];
+      if(hx>=0&&hx<256&&hud_z[hx]>depth)color=hud_c[hx];
+      row[X]=s_rgb15[color&32767];
     }
   }
 }
@@ -1091,6 +1181,12 @@ int LagoonSceneRenderer_RenderMotion2x(uint32_t *out,unsigned width,const Lagoon
      width<256||width>512||width%2)return 0;
   int wx=s->wx,wy=s->wy;unsigned nx=s->native_x,ny=s->native_y,bx=s->bg2_x,by=s->bg2_y;
   s_motion_wx0=wx;s_motion_wy0=wy;
+  /* parallax rooms: BG2 scrolls at its own rate, so one camera-keyed cache
+   * cannot hold both layers; those pictures decode per row instead */
+  if(!pos->map_only&&!s->parallax&&!(s_bgc.valid&&s_bgc.serial==s->serial&&s_bgc.generation==s->generation&&
+      s_bgc.width==width&&s_bgc.bg2_x==pos->bg2_x&&s_bgc.bg2_y==pos->bg2_y)) {
+    s_motion_render=3;bg_cache_build(s,width,pos->bg2_x,pos->bg2_y);s_motion_render=0;
+  }
   int16_t ox[128];uint16_t oam[256];static int32_t objx[OBJECTS],objy[OBJECTS];
   memcpy(ox,s->policy.x,sizeof ox);memcpy(oam,s->oam,sizeof oam);
   for(unsigned i=0;i<s->count;++i){objx[i]=s->objects[i].x;objy[i]=s->objects[i].y;}
