@@ -57,6 +57,8 @@
 #include "lagoon_achievement_ending.h"
 #include "lagoon_wide_ai.h"
 #include "lagoon_boss_hud.h"
+#include "lagoon_motion_log.h"   /* gabbycat4: LAGOON_MOTION_LOG / LAGOON_OAM_LOG */
+#include "lagoon_smooth.h"       /* gabbycat4: PicturesPerSecond */
 #include "snes/interp_bridge.h"
 #include "snes/ppu.h"
 #include "config.h"
@@ -277,6 +279,7 @@ static void LagoonHost_ReturnSelftest(unsigned frame){
 }
 static void LagoonHost_AfterConfig(void) {
     LagoonWide_AfterConfig();
+    LagoonSmooth_AfterConfig(lagoon_config_path);
     LagoonSettings_Configure(lagoon_config_path);LagoonSettings_SetZoom(LagoonWide_GetZoom());
     memset(&lagoon_zoom_key,0,sizeof lagoon_zoom_key);memset(&lagoon_zoom_pad,0,sizeof lagoon_zoom_pad);
     lagoon_zoom_pad_pending=lagoon_zoom_back_held=0;
@@ -392,8 +395,11 @@ static void LagoonHost_BeginFrame(unsigned frame) {
     if(g_ppu)sword_appends+=LagoonSwordVisual_Prepare(g_ppu,g_rom,0x100000,g_ram,
         LagoonQol_SwordReachEnabled() && (!g_config.widescreen || g_ppu->wsLayerWidenMask==3));
 }
+static void LagoonHost_Reset(void) {LagoonWide_Reset();LagoonSmooth_Reset();}
 static void LagoonHost_AfterFrame(const SnesDesktopHostFrameStats *stats) {
     LagoonHost_StartSession();
+    LagoonMotionLog_EndFrame(stats->frame,g_ppu,g_ram,g_snesrecomp_last_hdmaen);
+    LagoonSmooth_AfterFrame(stats->frame,g_ram);
     uint64_t generation=RtlStateGeneration();
     LagoonHost_Generation();
     int ready=LagoonHost_GameplayReady();
@@ -589,12 +595,13 @@ static const SnesDesktopHostGame kGameHost = {
     .draw_frame          = LagoonHost_DrawFrame,
     .presentation_geometry = LagoonWide_PresentationGeometry,
     .presentation_compose = LagoonHost_PresentationCompose,
+    .presentation_hz     = LagoonSmooth_PresentationHz,
 #ifdef _WIN32
     .create_renderer = LagoonD3D11_Create,
     .renderer_title_ui = LagoonD3D11_TitleUi,
     .renderer_capture = LagoonD3D11_Capture,
 #endif
-    .on_reset            = LagoonWide_Reset,
+    .on_reset            = LagoonHost_Reset,
     .after_run_frame     = LagoonHost_AfterFrame,
     .on_shutdown         = LagoonHost_Shutdown,
     .title_gamepad_button = LagoonHost_Gamepad,

@@ -1,0 +1,291 @@
+Lagoon (USA) SNES recomp: smooth-motion notes (gabbycat4 fork of rages4calm/LagoonSNESRecomp)
+====================================================================================
+
+Step 1 (2026-11-18): reading the port. No changes made yet.
+
+ROM
+---
+lagoon.sfc: 1 MiB, unheadered, USA LoROM.
+  SHA-256 46c811f0cacffe8f20e1d63072d25d7c47e9bb3fd5124851fd05aca9884d21fb  (matches the port's required ROM)
+  SHA-1   416aad89d76d4a74e2db985db1aee3a50dbafec8
+  CRC32   d2554270 (from docs/BUILDING.md)
+
+Project facts
+-------------
+- Upstream v0.5.2 (VERSION). Fork remotes: origin = gabbycat4, upstream = rages4calm. Branch main, clean.
+- LICENSE: PolyForm Noncommercial 1.0.0, copyright Matthew Stanley (mstan). Same licence as our NES
+  games: a public noncommercial fork with changes is allowed. Keep the LICENSE, credit rages4calm and
+  mstan first in the README. Commercial use needs the licensor.
+- Engine: snesrecomp submodule (RetroPortingToolKit/snesrecomp) pinned at 98f4183, plus Lagoon's own
+  cumulative engine patch patches/lagoon-framework.patch (83 files). The patch is applied at build time
+  by tools/apply_framework_patch.py (it refuses any other engine commit). The submodule is clean now.
+  => Our engine changes, if any, should become an addition to that patch (or better: avoid needing any).
+- Menu: recomp-ui submodule af7a6d9. The in-game Options (R2 / Ctrl+comma) are Lagoon's own
+  (lagoon_settings.c, tabs Sound/Journal/Items/Display/Travel).
+- Huge, careful codebase: ~130 files in src/, 74 qualified rooms, strict "native only" CPU mode.
+  Their docs insist on matched before/after comparisons for anything touching game timing. We only
+  touch PRESENTATION, never game code or timing, which keeps us out of that area.
+
+SNES terms (plain language)
+---------------------------
+- Field / frame: one screen refresh, 1/60 s (NTSC SNES: 60.0988 Hz).
+- PPU: the SNES picture chip. Draws up to 4 background layers (BG1-BG4) plus sprites (OBJ).
+- BG mode: which layer combination is in use (modes 0-7). Mode 7 = one rotating/scaling layer.
+- Scroll (HOFS/VOFS): each layer's own camera offset. Lagoon's code calls them hScroll[]/vScroll[].
+- OAM: the sprite list (128 entries on SNES vs 64 on NES), same idea as on the NES.
+- HDMA: the SNES changing a register on every line automatically (gradients, wavy water,
+  split scrolling). The NES equivalent was our "scroll bands" done by hand.
+- Colour math: blending layers together (transparency, shadows, fades).
+- INIDISP: master screen brightness 0-15 (fades). 15 = full.
+- WRAM: the game's work memory (like NES RAM, 128 KiB). Addresses below are WRAM.
+
+Where things are (answers to the Step 1 questions)
+---------------------------------------------------
+1. The frame loop: the engine owns it, not Lagoon.
+   snesrecomp/runner/src/desktop/host_main.c (5,854 lines after the patch), main loop ~line 4850:
+   RtlRunFrame (emulate one field) -> CaptureSimulationFrame -> DrawPpuFrameWithPerf (present).
+   src/main.c is a thin "shim" that fills a hook table (SnesDesktopHostGame) and calls
+   snesrecomp_desktop_main(). One thread: no emulation thread / second core.
+
+2. How the picture is made:
+   - The engine's PPU draws the original 256x224 picture ("field").
+   - Lagoon then REDRAWS the world itself on the CPU for widescreen/zoom: lagoon_widescreen.c +
+     lagoon_scene_renderer.c ("title compositor"). It rebuilds the room's terrain from copied tile
+     data at any camera position, draws supported actors (lagoon_wide_entities.c), HUD on top.
+   - It only replaces the original picture after a whole-field exact comparison (their self-check,
+     "full-word, whole-field equality"), and draws only from data copied at frame end ("TryPresent
+     never reads the mutable guest"). These are our self-check and snapshot rules, already built in.
+   - Anything not qualified (menus, spells, cutscenes, fades, unsupported scenes) shows the original.
+   - Zoom/expanded view is composed on the CPU per presented picture (presentation_compose hook).
+     Final scaling and Enhanced pixels (EPX/MMPX) run on the GPU. Linux = OpenGL presenter.
+     Windows = D3D11 (not our concern on CachyOS, but our code must not break it).
+
+3. Hooks between "frame done" and "picture shown" (our HOST_EXTRAS equivalent) - all exist:
+   before_run_frame / after_run_frame   around the emulated field
+   begin_sim_frame / end_sim_frame      around drawing the PPU picture (end gets the 256-wide field)
+   draw_frame(dst, field, w, h, alpha)  compose the picture to show  <- Lagoon: LagoonHost_DrawFrame
+   presentation_compose                 the zoomed/expanded composition per picture
+   on_reset                             timeline jumped (reset, state load, overlay closed)
+   presentation_hz(display_refresh)     <- NOT USED BY LAGOON. See point 4.
+
+4. Frame pacing: THE BIG FIND.
+   The engine already supports in-between pictures (it came from Super Metroid's port):
+   - If the game sets the presentation_hz hook, the clock (host_clock.c) presents at that rate
+     while simulating at 60.0988, and calls draw_frame again for every picture with
+     alpha = 0..1 = how far we are between the last two simulated fields.
+   - In that mode the driver's VSync is switched off automatically (the engine paces itself).
+   - In-between pictures only happen while waiting for the next field (single thread), like our
+     engine before the emulation thread. Second core = later, only if the pacing numbers ask.
+   - Lagoon's draw path ignores alpha today ((void)alpha in LagoonWide_DrawFrame).
+   So Step 4.1 is mostly: set presentation_hz from our setting, and make Lagoon's drawing use
+   a position for the in-between moment. No engine change needed for the basic version.
+
+5. "Only 30 FPS": answered by their own test, to be confirmed by measuring.
+   tests/lagoon_cloud_motion76_test.c: "Half-rate main tick reproduces the measured one
+   tick/two fields". Lagoon's main game logic runs once every TWO fields (30 Hz): case (a) in
+   lagoonplaybook section 0.5, the best case for in-between pictures (30 -> 240 = 8 pictures
+   per game step). The window still runs at 60, showing each game picture twice.
+   Important consequence: the engine's alpha is measured between FIELDS (60 Hz). For a 30 Hz
+   game we need our own phase: which field of the pair we are in, and blend over the pair
+   (same as the 30 Hz handling on Double Dragon II). Confirm in Step 3 that camera AND sprites
+   step on the same field of the pair, and whether the "faster walking" QoL option changes it.
+
+6. Camera: WRAM $0480/$0482 = BG1 (main terrain) X/Y, $0484/$0486 = BG2 X/Y, $048E = room number
+   (0..$4A, 75 rooms). Parallax rooms move BG2 at its own rate (quarter scroll); the renderer
+   already handles both layers separately. Top-down game: expect X and Y moving together.
+   Existing camera features: QoL "centered camera" (lagoon_qol.c), live zoom 1x/1.25x/1.5x
+   (R3 / Ctrl+Z), widescreen aspects, square pixels. Smooth camera must sit inside their renderer's
+   camera (view_origin() in lagoon_scene_renderer.c), not on top of it.
+
+7. Measuring tools already there (no need to build ours first):
+   SNESRECOMP_PRESENT_LOG=file.csv   every presented picture: present, frame, alpha, crc32, luma
+                                     (tools/present_curve.py summarises it)  ~ our pacing log
+   SNESRECOMP_HOST_PROFILE=1         wall time split: guest, raster, compose, present, wait ...
+                                     ~ our CYC_PACING_LOG / MM2_PERF_LOG
+   SNESRECOMP_OSD_FPS=1              FPS readout on screen
+   SNESRECOMP_SCREENSHOT_FROM/_TO/_DIR  pictures by frame number
+   --script <file>                   scripted input (tools/script_*.txt examples) ~ our route.txt
+   --campaign-warps <plan>           private test cheat: start in any of the 75 rooms
+                                     (tools/CAMPAIGN-WARPS.md, campaign_rooms.py)
+   --framedump, tools/framedump_summary.py, tools/ram_track.py, Mesen lua scripts (tools/*.lua)
+   Save states: F7 menu (engine's), rewind filmstrip.
+   Missing compared to our NES logs: a per-frame scroll/OAM/palette log. Step 2 adds a small one
+   (game-side, in after_run_frame / end_sim_frame), reading only what the frame finished with.
+
+Building on Linux (from docs/BUILDING.md, scripts/build_port.py)
+----------------------------------------------------------------
+Needs Python 3.11+, Rust (cargo), CMake 3.20+, Ninja, C/C++ compiler, SDL3 (static, fetched by the
+build), zlib, OpenGL/X11/Wayland/audio dev headers.
+  python3 -P scripts/build_port.py --rom ~/Projects/LagoonSNESRecomp/lagoon.sfc
+-> applies the engine patch, generates the game's C from the ROM (src/gen/, never committed),
+   builds the strict-native game in build-port/. Program: build-port/LagoonSNESRecomp.
+Note: the patch step modifies the snesrecomp submodule's files (expected; it shows as "modified
+content" in git status). Don't commit that submodule change.
+
+Open questions (lagoonplaybook section 4)
+-----------------------------------------
+- 30 Hz confirmed? (Step 3 measurement)
+- Which picture options first: start with plain widescreen at zoom 1x, square pixels off, Enhanced
+  pixels off. Then zoom 1.25/1.5, then Enhanced pixels.
+- Fork-only, or offered back to rages4calm as a pull request? Their code style is very strict
+  (qualification reports); a PR would need the same kind of evidence. Decide later.
+- Cost of composing at 240: the zoomed CPU composition runs once per picture. Measure with
+  SNESRECOMP_HOST_PROFILE before deciding whether in-between pictures need a cheaper path.
+
+Step 2 (2026-11-18): measuring tools
+------------------------------------
+Added (our own file, 5 lines in theirs):
+  src/lagoon_motion_log.c/.h   LAGOON_MOTION_LOG=motion.log, LAGOON_OAM_LOG=oam.log (format in the .c)
+  hooks: main.c LagoonHost_AfterFrame (once per field), lagoon_widescreen.c
+         LagoonWide_ObserveRaster (every line, for scroll bands), CMakeLists.txt source list.
+  tools/lagoon_motion.lua      Mesen 2 script: same tick/room/camera/player numbers from the real game.
+Pacing log = the engine's own SNESRECOMP_FRAME_TIMING=timing.csv (per presented picture: time,
+  guest/raster/compose/present ms, wait overshoot, audio buffer waits; 36,000 frames max = 10 min).
+Logs are git-ignored locally via .git/info/exclude (their .gitignore untouched).
+Step 1 session (6 min, windowed, VSync on): 59.5-60.1 fields/s real, ~6 ms work per 16.7 ms field
+  (guest 3.9, raster 0.9, compose 0.9, present 0.2), CPU 37% of one core. Not heavy on Linux.
+  OSD's 63-66 = average of per-frame rates -> uneven intervals, not speed. Mesen showed 60.11 steady.
+Game RAM: tick $0408 (main logic, believed 30 Hz), actors 32 x $40 from $0500 (slot 0 = Nasir,
+  +2 X, +4 Y, +24 type, live when (byte0 & $C0) == $C0).
+
+Step 3 (2026-11-18): measurements
+---------------------------------
+Mesen (real game, 20 s town walk) vs port: IDENTICAL rhythm. Game tick $0408 every 2nd field
+(246/246 Mesen, 566/566 port town, 12,607/12,607 port field session). Nasir 3 px per tick, camera
+3 px on the same fields. Port movement is correct; the roughness is the game's 30 Hz 3-px hops.
+Lagoon movement is 4-directional only (no diagonal steps seen in either log).
+
+8-min session (rooms 0 town, 2, 3 field with enemies; no spells yet):
+- Camera: +-3 px per tick in X or Y, 0 moves off tick fields. Rare 6 px (two steps at once),
+  1-2 px at edges. One camera for the whole screen: HDMA never on, scroll bands only on 2 fields.
+  BG mode 1 (with BG3 priority, logged m=9) in play; m=0 on loading/forced blank.
+- Player: 3 px per tick; 6 px ~170 times (knockback/double step). Never blinks (always has
+  sprites near him).
+- Enemies: 25-30 live actor slots in room 3, mostly 2 px per tick (some 1, knockback 6),
+  all on tick fields (3 exceptions in ~8,200 moves). Same 30 Hz beat as the camera.
+- OAM: 20-50 sprites a field, slot order stable (never reshuffled; unlike NES DD2/BOS/NG).
+- Palette: no hit flashes found. Menu open = 181 colours dim (lum .40 -> .29), restored on close.
+  Water colour cycling: entries 72,73,74 rotate every 8 fields (blues 6540/65e6/4043).
+  Another 2-entry cycle at $5E/$5F every 12 fields (town, early in session).
+- Fades: INIDISP 15 -> 0 one step every 2 fields (~0.5 s). Room loads: 63-289 fields without
+  ticks (forced blank, INIDISP $80).
+- Timing (town run, VSync on, windowed): picture gaps mean 16.8 ms but stdev 3.5 ms (2-36 ms).
+  Cause: the picture goes out after emulating, and emulation takes 1-7.5 ms (tick fields heavier).
+  Wait itself is exact (overshoot 0.001 ms). Decoupled presentation (presentation_hz) removes it.
+- Audio: no audio-buffer waits in either logged run. Rare stutter not captured yet.
+- Bug fixed: oam.log wrote garbage on fields with zero sprites (buf not cleared). Rebuild needed.
+Still to measure: spells/magic (none found yet), bosses, cutscenes, other water/parallax rooms.
+
+Step 4.1 (2026-11-18): in-between pictures, first version
+---------------------------------------------------------
+src/lagoon_smooth.c/.h (ours). Setting: config.ini [Lagoon] PicturesPerSecond = 60|120|180|240
+(60 = off, default). LAGOON_PICTURES=n overrides one run. LAGOON_SMOOTH_LOG=file: per picture
+"frame alpha t drawn reason"; exit line [lagoon-smooth] with counters (stderr / profile.txt).
+How: presentation_hz hook -> host presents at that rate and calls draw_frame with alpha. After
+their scene renderer replaced the picture with its verified packet (TryPresent), we redraw that
+same packet with camera + sprites part way between the last two game steps:
+  t = (fields since step + alpha) / period (period = fields between steps, normally 2).
+  Interpolated in world coords, rounded identically for camera and sprites (static things stay on
+  the ground, Nasir stays fixed on screen). Steps > 8 px = jump, no in-between.
+  Whole pixels at game resolution (crisp; MMPX still works). 180 = even rhythm for 3 px steps
+  (0.5 px a picture); 240 = 3 px over 8 pictures (uneven 0/1 pattern). Sub-pixel = later option.
+Their files: lagoon_scene_renderer.c/.h (+Motion accessor, +RenderMotion, s_motion_render flag:
+  no background cache, backgrounds from the room map instead of the streamed VRAM tilemap),
+  lagoon_widescreen.c (call after TryPresent, zoom 1x only), main.c (presentation_hz, reset, config).
+Self-checks: only over a verified packet (TryPresent replaced); every new packet the room-map
+  redraw at the real positions must equal that picture, else no in-between pictures.
+Limits: widescreen on, zoom 1x; scenes their renderer doesn't qualify (menus, spells, cutscenes,
+  fades) stay at 30 Hz motion. Delay: up to 2 fields (33 ms) more than the original.
+Offline test (stub renderer, camera following Nasir, static + walking enemy, 240): PASS.
+build-port/config.ini set: Widescreen 1, Fullscreen 1, [Lagoon] WideAspect 16:9, ViewExtent 1,
+  PicturesPerSecond 180 (old file kept as config.before-smooth.ini).
+
+Step 4.1 round 1 result (2026-11-18, 180, 443 s, rooms 0-7):
+- Works: 77,123 pictures / 26,541 fields = 174 a second; 40,723 in-between pictures.
+- User: "guards shake when you move" (two guards by the stairs, cave rooms 5-7). Self-check failed
+  on up to 1/3 of fields there (546 failed checks overall, nearly all frames 24,000-25,800):
+  failed fields hop, others glide -> shake. Cause: room-map backgrounds differ from the screen there.
+- Picture timing: every field's first picture came 8-9 ms after the previous one (emulation
+  ~4.5 ms + raster + compose ran first), the next 2.5-3 ms later. Stdev 3 ms at a 5.56 ms period.
+Round 2 changes:
+- Engine (patches/gabbycat4-smooth.patch, applied in the snesrecomp copy; their own patch still
+  reverse-checks as applied, so tools/apply_framework_patch.py is unaffected): a picture due
+  together with the next field is presented BEFORE the field runs, alpha 1.
+- PresentationHz = (pps/60) x 60.098811862 (180.30), so pictures stay in phase with fields.
+- In-between backgrounds: centre from the PPU tile memory (same source as the verified picture),
+  margins from the room map (LagoonSceneMotion.map_only = 0). Trailing-edge risk: shifting back
+  <= 8 px reveals rows/columns the game may already have re-streamed; vertical map is 256 rows
+  vs 225 shown, so probably intact. Watch for garbage lines at the screen edge while walking.
+- smooth.log now has "map-diff room n x y cam" lines (where the room map differs from the screen)
+  and "check-diff" lines.
+
+Step 4.1 round 2 result: guards fixed (0 failed checks of 16,853). Still shaking: enemies, Nasir
+when swinging the sword, town doors. Picture timing unchanged (stdev 3.4 ms): the "picture first"
+rule never fired (picture deadline a hair after the field's by rounding).
+Analysis (town logs): sprite pieces move on step fields only, except POSE changes (Nasir's pieces
+jump -5,+8 on an off field = sword/pose). Following pieces slid them between poses -> wobble.
+Camera word $0480 vs BG1 scroll: equal on most fields, scroll 3 px behind on ~28% (horizontal,
+step fields): scroll follows the camera one field late. Sprites agree with either ~95%.
+Pieces relative to their actor (screen = actor - camera): player x -24..+20, y -35..+6.
+Round 3 (character-based motion, src/lagoon_smooth.c rewritten):
+- LagoonSmooth_AfterFrame records tick $0408, camera $0480/$0482, actors (32 x $40 from $0500,
+  live = byte0 & $C0, X +2, Y +4) per field (ring of 16, keyed by frame = packet frame).
+- Step = tick change. Camera + actors interpolated (doubles), rounded with the same fraction.
+- Each OAM piece / scene object tied to the nearest actor in the to-frame (box dx -28..28,
+  dy -44..12); it moves with that actor, pose shown at once. No actor: own motion if same tile,
+  else fixed in the world.
+- Background drawn at the interpolated CAMERA WORD, correcting the scroll's one-field lag
+  (also at t = 1, so a lag field differs from the original by design: the ground no longer
+  trails the sprites by a field).
+- Engine: "picture first" if due within half a picture period (patch regenerated).
+- smooth.log: step-info lines (room, tick, cam, scroll-lag, period), check-diff lines.
+Offline test (stub renderer, 180, scroll lag on step fields, pose change on an off field,
+walking enemy with alternating pose, static door): PASS, strict (door exactly on the ground in
+all 180 pictures).
+
+Step 4.1 round 4 result: edge garbage and guard shake gone. Town "very stuttery", blur when
+scrolling (cave too); fights decent. Log: camera speed is right (3 px per step), but pictures sat
+~half a slot off the field phase (t*6 around k+0.5, spread +-0.2), right on rounding boundaries:
+camera moves per picture 0/1 in a ragged pattern (1,269 x 0 px, 1,221 x 1 px, not alternating).
+Vertical scroll lag exists too (scroll-lag y -1 normal, +2 / -4 = 3 px lag).
+Round 5: picture phase by COUNT within the field (k/n, n = pps/60; the pre-field picture with
+alpha 1 = n), not by clock. Offline test with the real pattern (pre-field picture alpha 1 + two
+post-field pictures with +-0.05 jitter, scroll lag): camera alternates 0/1 px strictly, PASS.
+Remaining limit: whole game pixels. At 180 a 3 px step = 6 pictures = 1 px every 2 pictures,
+i.e. 90 visible moves a second of ~4.8 screen px each (1080p: 224 lines -> 4.8x). Next idea:
+half-pixel output (presentation_geometry 2x + presentation_compose drawing at half-pixel
+positions; frame stays 1x everywhere else), which gives one 2.4 px move per picture at 180.
+
+Step 4.1 round 5 result: stutter much reduced. Problems: HUD key icon (a sprite, bottom right)
+moved while walking; Nasir double/triple images next to the guards. FPS 181, cave lighter.
+Round 6 (assign_owners rewritten):
+- HUD sprites: bottom band (y >= 180), same tile and same screen position as the previous step's
+  packet -> owner kOwnerScreen: drawn exactly where the game put it.
+- Owner by motion: candidates = characters whose box holds the piece; if the piece kept its tile,
+  the candidate whose (actor delta - scroll delta) explains the piece's screen delta wins
+  (score 1000 x error + distance). Pose-changed pieces take the owner of a neighbouring OAM slot
+  (+-3) decided by motion, if that character's box holds them; else nearest.
+Offline test (Nasir walks past a standing guard 14 px away, camera not following, pose piece,
+HUD icon at y 200): PASS (no ghost, guard on the ground, HUD fixed).
+
+Step 4.1 round 6 result: cave great, guards good, no duplicates, HUD key fixed. Town still
+"stuttering like it's too hard to run". Timing: CPU idle ~60%, but per field: pre-field picture on
+time; the first picture after the field ran came 1-3 ms late (field work on tick fields: guest
+~4.2 + raster ~0.9-1.3 + compose ~1.7 = 6.8-8.5 ms > the 5.55 ms slot), the next one early.
+26-32% of pictures > 7.5 ms apart, all rooms; town busiest.
+Round 7:
+- Engine (patch regenerated): with decoupled presentation at >= 1.5x the field rate, the field
+  may start up to 0.9 picture periods before its deadline (right after the last picture before
+  it), so its emulation is done before the first picture that needs it. Deadline unchanged.
+  (No <math.h> in host_main.c: no fmin there.)
+- lagoon_smooth.c: the redundant self-check redraw runs once per 60 packets (and at each new
+  scene / after a failure) instead of every field.
+
+Step 4.1 round 7 result: town much closer to a steady 180 FPS, "audio improved too" (plausible:
+fields run at a steadier point). Still ~20% of town pictures > 7.5 ms apart. Timing slice: the
+picture grid and the field deadlines had drifted apart (the field deadline re-anchors after any
+slow field, e.g. a room load; the picture clock does not): third picture ~2 ms early, the next
+field's first ~2 ms late, though every wait was exact.
+Round 8 (engine, patch regenerated): after each field (simulation_done), snap next_presentation
+onto the grid next_simulation - k * period (moves it <= half a period), so one picture always
+coincides with each field deadline. No math.h used.

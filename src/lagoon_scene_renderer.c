@@ -62,6 +62,8 @@ typedef struct ScenePacket {
 static ScenePacket s_packets[2];
 static unsigned s_build,s_complete=1,s_serial,s_cache_serial,s_cache_width;
 static int s_mode=2;
+static int s_motion_render; /* gabbycat4: 1 = in-between redraw (no cache), 2 = same with room-map backgrounds only */
+static int s_motion_wx0,s_motion_wy0; /* gabbycat4: the packet's own world origin during a redraw */
 static int s_edge_clip=1;
 static char s_report[2048];
 static const char *s_status="reset";
@@ -692,14 +694,26 @@ int LagoonSceneRenderer_MapImage(unsigned room,uint64_t generation,
  * pixels from the reference field. Both audited maps are 64x32 eight-pixel tiles. */
 static void background_row_extent(const ScenePacket *s,unsigned width,int y,int left,
     unsigned layer,uint8_t *depth,uint16_t *colors,int native_height) {
+  /* gabbycat4: a shifted in-between redraw reads the streamed PPU tilemap only
+   * inside the world area the original field actually showed; columns/rows it
+   * did not show may not be streamed yet (garbage at the leading edge), so
+   * they come from the room map like the widescreen margins. */
+  int native_lo=left,native_hi=left+256,rows_ok=1;
+  if(s_motion_render==1){
+    int shift=s_motion_wx0-s->wx;
+    if(left+shift>native_lo)native_lo=left+shift;
+    if(left+shift+256<native_hi)native_hi=left+shift+256;
+    if(native_hi<native_lo)native_hi=native_lo;
+    rows_ok=s->wy+y>=s_motion_wy0&&s->wy+y<s_motion_wy0+native_height;
+  }
   for(unsigned x=0;x<width;) {
-    int native=(int)x>=left&&(int)x<left+256&&y>=0&&y<native_height;
+    int native=(int)x>=native_lo&&(int)x<native_hi&&rows_ok&&y>=0&&y<native_height;
     int static_bg2=s->parallax&&layer==1;
     int qx=static_bg2?(int)s->bg2_x+(int)x-left:
       native?(int)s->native_x+(int)x-left:s->wx+(int)x-left;
     int qy=static_bg2?(int)s->bg2_y+(int)y:
       native?(int)s->native_y+(int)y:s->wy+(int)y;
-    unsigned boundary=(int)x<left?(unsigned)left:native?(unsigned)left+256:width;
+    unsigned boundary=(int)x<native_lo?(unsigned)native_lo:native?(unsigned)native_hi:width;
     unsigned count=8-(qx&7);if(count>boundary-x)count=boundary-x;
     unsigned tile;
     if(static_bg2) {
@@ -737,7 +751,7 @@ static void background_row_extent(const ScenePacket *s,unsigned width,int y,int 
  * Detached zoom scenery below the HUD uses world definitions instead. */
 static void background_row(const ScenePacket *s,unsigned width,int y,int left,
     unsigned layer,uint8_t *depth,uint16_t *colors) {
-  background_row_extent(s,width,y,left,layer,depth,colors,H);
+  background_row_extent(s,width,y,left,layer,depth,colors,s_motion_render==2?0:H);
 }
 /* Native-aligned mosaic blocks extend mathematically into the margins. The
  * generic PPU's clamped native mosaicModulo table is deliberately not used.
@@ -800,7 +814,7 @@ static void remember_background(const ScenePacket *s,unsigned width) {
 }
 static void render_into(const ScenePacket *s,unsigned width,uint32_t *pixels,int skip_cloud) {
   int left=(int)(width-256)/2;
-  int background_match=same_background(s,width);
+  int background_match=!s_motion_render&&same_background(s,width);
   int reuse_background=background_match&&s_background.valid==2;
   if(reuse_background)++s_background_reuses;else ++s_background_builds;
   for(unsigned y=0;y<H;++y) {
@@ -882,6 +896,7 @@ static void render_into(const ScenePacket *s,unsigned width,uint32_t *pixels,int
       pixels[y*width+x]=outside?0:color;
     }
   }
+  if(s_motion_render)return;
   if(!background_match)remember_background(s,width);
   else if(!reuse_background)s_background.valid=2;
   ++s_stats.renders;s_stats.independent_pixels+=(uint64_t)width*H;
@@ -953,6 +968,49 @@ int LagoonSceneRenderer_TryPresent(uint8_t *dst,size_t pitch,const uint8_t *ref,
       (s_mode==2?"replaced":"verified"),s->frame,width);return s_mode==2;
 }
 void LagoonSceneRenderer_GetStats(LagoonSceneRendererStats *out){if(out)*out=s_stats;}
+
+/* gabbycat4 smooth motion (see lagoon_scene_renderer.h). */
+int LagoonSceneRenderer_Motion(LagoonSceneMotion *m){
+  const ScenePacket *s=&s_packets[s_complete];
+  if(!m||s_mode!=2||!s->valid||s->incoming_mosaic||!s_view_serial||s_view_serial!=s->serial||
+     s->count>LAGOON_SCENE_MOTION_OBJECTS)return 0;
+  m->map_only=0;m->generation=s->generation;m->serial=s->serial;m->frame=s->frame;m->room=s->room;m->parallax=s->parallax;
+  m->wx=s->wx;m->wy=s->wy;m->native_x=(int)s->native_x;m->native_y=(int)s->native_y;
+  m->bg2_x=(int)s->bg2_x;m->bg2_y=(int)s->bg2_y;
+  for(unsigned slot=0;slot<128;++slot){
+    const uint8_t *o=(const uint8_t *)s->oam+slot*4;
+    m->oy[slot]=o[1];m->ox[slot]=s->policy.x[slot];m->tile[slot]=(uint16_t)(o[2]|o[3]<<8);
+    m->visible[slot]=s->policy.allow[slot]&&!(o[1]>=224&&o[1]<240);
+  }
+  m->count=s->count;
+  for(unsigned i=0;i<s->count;++i){
+    m->objx[i]=s->objects[i].x;m->objy[i]=s->objects[i].y;
+    m->objorder[i]=s->objects[i].order;m->objslot[i]=s->objects[i].slot;
+  }
+  return 1;
+}
+int LagoonSceneRenderer_RenderMotion(uint32_t *out,unsigned width,const LagoonSceneMotion *pos){
+  ScenePacket *s=&s_packets[s_complete];
+  if(!out||!pos||!s->valid||s->serial!=pos->serial||s->count!=pos->count||width<256||width>W||width%2)return 0;
+  /* Temporarily place the packet, draw, restore. Same thread as every other
+   * use of the packet; nothing is read from the live guest. */
+  int wx=s->wx,wy=s->wy;unsigned nx=s->native_x,ny=s->native_y,bx=s->bg2_x,by=s->bg2_y;
+  s_motion_wx0=wx;s_motion_wy0=wy;
+  int16_t ox[128];uint16_t oam[256];int32_t objx[OBJECTS],objy[OBJECTS];
+  memcpy(ox,s->policy.x,sizeof ox);memcpy(oam,s->oam,sizeof oam);
+  for(unsigned i=0;i<s->count;++i){objx[i]=s->objects[i].x;objy[i]=s->objects[i].y;}
+  s->wx=pos->wx;s->wy=pos->wy;s->native_x=(unsigned)pos->native_x;s->native_y=(unsigned)pos->native_y;
+  s->bg2_x=(unsigned)pos->bg2_x;s->bg2_y=(unsigned)pos->bg2_y;
+  for(unsigned slot=0;slot<128;++slot){
+    s->policy.x[slot]=pos->ox[slot];((uint8_t *)s->oam)[slot*4+1]=pos->oy[slot];
+  }
+  for(unsigned i=0;i<s->count;++i){s->objects[i].x=pos->objx[i];s->objects[i].y=pos->objy[i];}
+  s_motion_render=pos->map_only?2:1;render_into(s,width,out,0);s_motion_render=0;
+  s->wx=wx;s->wy=wy;s->native_x=nx;s->native_y=ny;s->bg2_x=bx;s->bg2_y=by;
+  memcpy(s->policy.x,ox,sizeof ox);memcpy(s->oam,oam,sizeof oam);
+  for(unsigned i=0;i<s->count;++i){s->objects[i].x=objx[i];s->objects[i].y=objy[i];}
+  return 1;
+}
 
 static int view_origin(int camera,int map,int extent,int native){
   int origin=map<extent?-(extent-map)/2:camera-(extent-native)/2;

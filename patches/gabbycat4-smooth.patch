@@ -1,0 +1,72 @@
+--- a/runner/src/desktop/host_main.c
++++ b/runner/src/desktop/host_main.c
+@@ -4869,7 +4869,14 @@
+       snes_host_clock_reset(&video_clock, video_now, g_simulation_hz, presentation_hz);
+       g_reset_clock = false;
+     }
+-    if (paced_realtime && !snes_host_clock_simulation_due(&video_clock, MonotonicSeconds())) {
++    /* gabbycat4 smooth motion: with decoupled presentation the next field may
++     * run up to 90% of one picture period EARLY, in the idle gap right after
++     * the last picture before its deadline. Its emulation then finishes before
++     * the first picture that needs it, instead of making that picture late.
++     * The field's deadline (and the guest's timing) are unchanged. */
++    double sim_lead = paced_custom && presentation_hz > g_simulation_hz * 1.5
++        ? 0.9 / presentation_hz : 0;
++    if (paced_realtime && MonotonicSeconds() < video_clock.next_simulation - sim_lead) {
+       if (snes_host_clock_presentation_due(&video_clock, MonotonicSeconds())) {
+         if (paced_custom) {
+           double presented_at = MonotonicSeconds();
+@@ -4882,11 +4889,30 @@
+           snes_host_clock_presentation_done(&video_clock, presented_at);
+         }
+       }
+-      WaitUntil(paced_custom ? snes_host_clock_next_deadline(&video_clock)
+-                             : video_clock.next_simulation);
++      double sim_start = video_clock.next_simulation - sim_lead;
++      WaitUntil(!paced_custom ? video_clock.next_simulation
++                : video_clock.next_presentation < sim_start ? video_clock.next_presentation
++                                                            : sim_start);
+       continue;
+     }
+ 
++    /* gabbycat4 smooth motion: a picture that is due together with the next
++     * field is shown BEFORE the field runs (alpha 1 = the end of the interval
++     * that just finished), so the field's emulation time never delays it.
++     * "Due" includes up to half a picture early: at an exact multiple of the
++     * field rate both deadlines coincide and rounding can put the picture's a
++     * hair after the field's. Without this, every field's first picture came
++     * 4-7 ms late and the next one early. */
++    if (paced_custom && !g_snes->disableRender && presentation_hz != g_simulation_hz &&
++        !snes_savestate_menu_is_open() &&
++        video_clock.next_presentation <= MonotonicSeconds() + 0.5 / presentation_hz) {
++      double presented_at = MonotonicSeconds();
++      g_present_alpha = 1;
++      DrawPpuFrameWithPerf();
++      ++presentations;
++      snes_host_clock_presentation_done(&video_clock, presented_at);
++    }
++
+     /* Input-source assignments apply to each keyboard map independently. */
+     PollKeyboardControls(snesrecomp_sdl_get_keyboard_state());
+ 
+@@ -5126,6 +5152,20 @@
+       bool keep_debt = game->keep_pacing_debt && game->keep_pacing_debt();
+       snes_host_clock_simulation_done(&video_clock, MonotonicSeconds(), keep_debt,
+                                       RtlLastFramePeriods());
++      /* gabbycat4 smooth motion: keep the picture grid locked to the field
++       * deadlines (one picture exactly at each field's deadline). The two
++       * clocks run at an exact multiple, but a slow field re-anchors the field
++       * deadline and left the pictures at a random offset: then one picture
++       * per field came early and the next late. Moves the grid by at most half
++       * a picture period. */
++      if (paced_custom && presentation_hz > g_simulation_hz * 1.5) {
++        double period = 1.0 / presentation_hz;
++        double ahead = (video_clock.next_simulation - video_clock.next_presentation) / period;
++        if (ahead > -64 && ahead < 64) {
++          long long whole = (long long)(ahead + (ahead >= 0 ? 0.5 : -0.5));
++          video_clock.next_presentation = video_clock.next_simulation - (double)whole * period;
++        }
++      }
+     }
+     else
+       snes_host_clock_reset(&video_clock, MonotonicSeconds(), g_simulation_hz, presentation_hz);

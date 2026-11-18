@@ -1,0 +1,16 @@
+# Lagoon Step 4.1, round 8: pictures locked to the game frames (town stutter)
+# Every line is a fish comment or a command, so a whole block can be pasted.
+# Logs land in build-port/. Tell Claude "done" after the run.
+
+# --- 1. Rebuild (ALWAYS first after Claude changes code) ---
+cd ~/Projects/LagoonSNESRecomp
+cmake --build build-port --target LagoonSNESRecomp 2>&1 | tail -5
+# If the last lines say "error", send them to Claude instead of running.
+
+# --- 2. Play with MangoHud (Shift+F12 hides/shows its box) ---
+# Please check: walking around town (was "too hard to run"), then the cave and a fight,
+# enemies, doors, a sword swing.
+cd ~/Projects/LagoonSNESRecomp
+env LAGOON_SMOOTH_LOG=smooth.log SNESRECOMP_FRAME_TIMING=timing.csv SNESRECOMP_HOST_PROFILE=1 mangohud ./build-port/LagoonSNESRecomp --no-launcher --rom lagoon.sfc 2> profile.txt
+
+# --- 3. Tell Claude "done" and what you saw. ---

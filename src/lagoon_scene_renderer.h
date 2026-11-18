@@ -71,4 +71,30 @@ int LagoonSceneRenderer_VisitedMapImage(unsigned room,
 int LagoonSceneRenderer_GameOver(const uint8_t *ram,const uint8_t *rom,size_t size);
 
 int LagoonSceneRenderer_ViewPlacement(unsigned width,unsigned height,uint64_t generation,int *left,int *top);
+
+/* gabbycat4 smooth motion: positions of the current verified packet, and a
+ * redraw of that same packet at other positions (in-between pictures). The
+ * redraw takes the backgrounds from the room map, never the live guest, and
+ * changes nothing that the ordinary presentation uses. */
+enum { LAGOON_SCENE_MOTION_OBJECTS = 512 };
+typedef struct LagoonSceneMotion {
+  uint64_t generation;
+  unsigned serial, frame, room, parallax;
+  int wx, wy, native_x, native_y, bg2_x, bg2_y;
+  uint8_t visible[128], oy[128];
+  uint16_t tile[128];   /* OAM tile + attributes word, for matching */
+  int16_t ox[128];
+  unsigned count;
+  int32_t objx[LAGOON_SCENE_MOTION_OBJECTS], objy[LAGOON_SCENE_MOTION_OBJECTS];
+  uint32_t objorder[LAGOON_SCENE_MOTION_OBJECTS];
+  uint8_t objslot[LAGOON_SCENE_MOTION_OBJECTS];
+  /* 0: centre from the PPU tile memory (as the verified picture), margins
+   * from the room map. 1: everything from the room map (diagnostics). */
+  uint8_t map_only;
+} LagoonSceneMotion;
+/* 1 when the latest completed packet was verified and presented this field. */
+int LagoonSceneRenderer_Motion(LagoonSceneMotion *out);
+/* Draw the latest completed packet with these positions into out (width x 224
+ * ARGB, pitch width*4). Returns 0 when the packet no longer matches pos. */
+int LagoonSceneRenderer_RenderMotion(uint32_t *out, unsigned width, const LagoonSceneMotion *pos);
 #endif

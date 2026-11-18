@@ -22,6 +22,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "lagoon_motion_log.h"
+#include "lagoon_smooth.h"
 
 static double s_aspect = 16.0 / 9.0; /* 0 means drawable aspect */
 static unsigned s_zoom=100;
@@ -787,6 +789,7 @@ void LagoonWide_BeginFrame(unsigned number) {
 /* Observe the actual raster, without adding a PPU line enhancer (which has
  * its own BG viewport semantics). SNES output row0 samples scrollY+1. */
 void LagoonWide_ObserveRaster(const Ppu *ppu,unsigned line,void *context) {
+  LagoonMotionLog_ObserveLine(ppu,line);
   LagoonEasterEgg_ObserveRaster(ppu,line,g_ram,RtlStateGeneration(),g_snesrecomp_last_hdmaen!=0);
   (void)context;
   if(ppu && line>=1 && line<=224) {
@@ -892,7 +895,6 @@ void LagoonWide_EndFrame(const uint8_t *field,unsigned number) {
 }
 int LagoonWide_DrawFrame(uint8_t *dst,size_t pitch,const uint8_t *field,
     int width,int height,double alpha) {
-  (void)alpha;
   if(!g_config.widescreen)return 0;
   RtlWidescreenPresent(dst,pitch,field,width,height);
   /* The original fullscreen spell owns a separate, finite background layout.
@@ -911,7 +913,7 @@ int LagoonWide_DrawFrame(uint8_t *dst,size_t pitch,const uint8_t *field,
   else if(s_outdoor_present)for(unsigned y=0;y<(unsigned)height && y<224;++y)
     LagoonWideRaster_MaskRoomRow(dst+y*pitch,(unsigned)width,
         &s_rows[y],s_extent_width,s_extent_height,s_row_known[y]);
-  LagoonSceneRenderer_TryPresent(dst,pitch,dst,pitch,(unsigned)width,(unsigned)height,RtlStateGeneration());
+  int scene_replaced=LagoonSceneRenderer_TryPresent(dst,pitch,dst,pitch,(unsigned)width,(unsigned)height,RtlStateGeneration());
   /* A proven incoming field owns its original native center. The independent
    * mosaic class writes margins only after exact native-word agreement; a
    * refused candidate retains the real center with safe blank margins. Never
@@ -921,6 +923,8 @@ int LagoonWide_DrawFrame(uint8_t *dst,size_t pitch,const uint8_t *field,
     s_zoom_geometry.valid=0; /* Never carry outgoing placement into a new native source. */
     return 1;
   }
+  /* gabbycat4: in-between pictures, only over a verified world picture at zoom 1x. */
+  if(scene_replaced&&s_zoom==100)LagoonSmooth_Draw(dst,pitch,(unsigned)width,(unsigned)height,alpha);
   /* Loader uploads can invalidate the exact world packet halfway through a
    * field. Keep one coherent full-width outgoing canvas during that interval,
    * using the real fade brightness. Incoming world output still needs every
