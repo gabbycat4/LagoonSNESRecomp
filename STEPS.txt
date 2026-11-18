@@ -1,4 +1,4 @@
-# Lagoon Step 4.6, round 2: second core with thread pinning
+# Lagoon Step 4.7, round 3: L2/R2 trigger safety (then commit)
 # Every line is a fish comment or a command, so a whole block can be pasted.
 # Logs land in build-port/. Tell Claude "done" after each run.
 
@@ -7,13 +7,10 @@ cd ~/Projects/LagoonSNESRecomp
 cmake --build build-port --target LagoonSNESRecomp 2>&1 | tail -5
 # If the last lines say "error", send them to Claude instead of running.
 
-# --- 2. Play with the second core (on by default at 180) ---
-# Walk around town (where it hitched), the cave, a fight. Also try: open/close the
-# menu, the map (M), save in the F7 state menu and load it again, pause.
+# --- 2. Play (half pixels are on by default with the second core) ---
+# Walk and pan in town and the cave; look at the blur when the screen scrolls.
+# Also check: the HUD, the key icon, the boss bar if you reach one, the menu, fades.
 cd ~/Projects/LagoonSNESRecomp
 env LAGOON_SMOOTH_LOG=smooth.log SNESRECOMP_FRAME_TIMING=timing.csv SNESRECOMP_HOST_PROFILE=1 mangohud ./build-port/LagoonSNESRecomp --no-launcher --rom lagoon.sfc 2> profile.txt
-# Tell Claude "done": smoothness in town, and whether the controls feel any slower.
 
-# --- 3. (Only if Claude asks) the same without the second core, for comparison ---
-cd ~/Projects/LagoonSNESRecomp
-env LAGOON_SECOND_CORE=0 mangohud ./build-port/LagoonSNESRecomp --no-launcher --rom lagoon.sfc 2> profile1core.txt
+# --- 3. Tell Claude "done": town smoothness, and whether you played with the controller or keys. ---

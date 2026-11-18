@@ -91,10 +91,16 @@ typedef struct LagoonSceneMotion {
   /* 0: centre from the PPU tile memory (as the verified picture), margins
    * from the room map. 1: everything from the room map (diagnostics). */
   uint8_t map_only;
+  /* Half-pixel offsets for RenderMotion2x: bit0 = +0.5 px in x, bit1 = +0.5
+   * px in y. half_bg moves the backgrounds; half_o / half_obj the sprites. */
+  uint8_t half_bg, half_o[128], half_obj[LAGOON_SCENE_MOTION_OBJECTS];
 } LagoonSceneMotion;
 /* 1 when the latest completed packet was verified and presented this field. */
 int LagoonSceneRenderer_Motion(LagoonSceneMotion *out);
 /* Draw the latest completed packet with these positions into out (width x 224
  * ARGB, pitch width*4). Returns 0 when the packet no longer matches pos. */
 int LagoonSceneRenderer_RenderMotion(uint32_t *out, unsigned width, const LagoonSceneMotion *pos);
+/* The same at double resolution (2*width x 448, pitch 2*width*4) with the
+ * half-pixel offsets in pos. width <= 512. The HUD layer (BG3) is not moved. */
+int LagoonSceneRenderer_RenderMotion2x(uint32_t *out, unsigned width, const LagoonSceneMotion *pos);
 #endif

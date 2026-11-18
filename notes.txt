@@ -327,3 +327,39 @@ Round 2: src/lagoon_affinity.c (port of nesrecomp cyc_affinity.c): guest thread 
 the second core of the largest L3 group, main thread = the rest of that group minus the guest's
 SMT twin. Engine hook pin_thread(role): main before SDL_CreateThread, worker at its top.
 LAGOON_PIN=0 turns it off. stderr prints "[lagoon threads] guest on CPU x, main on CPUs ...".
+
+Step 4.6 round 2 result (pinned): guest 3.0 ms on CPU 1 (main 0,2,3,8,10,11), 60.00 fields/s,
+180 pictures/s, late pictures 7%, gap stdev 1.5 ms. "Very decent, no stutter". Committed 6e1384b+.
+Step 4.7 (2026-11-18): half-pixel pictures
+- Presentation at double size (LagoonWide_PresentationGeometry -> 2*sw x 448) when
+  LagoonSmooth_HalfPixels: pps > 60, second core, [Lagoon] HalfPixels (default 1;
+  LAGOON_HALF_PIXELS=0), widescreen, zoom 1x, 2*sw <= 1024.
+- lagoon_scene_renderer.c render_into_2x / RenderMotion2x: backgrounds decoded at 1x per source
+  row (one extra column/row) and doubled with a half-pixel shift; sprites and scene objects on the
+  2x grid with their own half offsets (half_bg / half_o / half_obj); BG3 HUD fixed. BUG FOUND by
+  the offline test: graphics() already mirrors h-flipped tiles (BG3 was flipped twice).
+- lagoon_smooth.c positions_at_scaled(t, out, scale): positions in 1/scale px; scale 1 = old.
+  DrawInbetween at 2x; self-check check2x once a second (2x at packet positions == verified 1x
+  doubled) else whole-pixel pictures doubled ("inbetween-doubled").
+- main.c: ordinary pictures at 2x = the 1x picture (+cameo, toast) doubled; in-between overlays
+  (boss bar, cameo, toast) drawn on a keyed 1x layer (0x5A0C0FFE) and doubled on top.
+- Engine PresentInbetween: frame size or double; OSD scale_div 1 at double size.
+- Offline tests in tools/smooth-tests (README): t2x/t2h/t2v against their real renderer with
+  random scenes, t7 timing: one half pixel per picture at 180, Nasir fixed, guard on the ground.
+
+Step 4.7 result: half pixels look better when smooth (guards), town stutters in both modes. Log:
+half-pixel draw 2.2 ms mean in town (1.3 cave); BUT both modes: 62% of joins waited (1.8 ms avg,
+7.5 s per run) though the guest needs only 3.4 ms of an ~11 ms window -> early joins.
+Suspect: SDL3 sends JOYSTICK/GAMEPAD_UPDATE_COMPLETE (+ hat, battery) after every pad state change;
+they were not in the "harmless" list, so each forced a join. Round 2: added them (and finger/pen
+motion, clipboard) to the list; [second-core] summary now splits waits for events and lists the
+early-join event types.
+
+Step 4.7 round 2 result (PS4 pad): "so much better, a few stutters". Joins that waited 2,626 -> 79;
+town late pictures 15% -> 2.7%, gap stdev 1.95 -> 0.82 ms; 180/s everywhere. Remaining early joins:
+0x651/0x652 = GAMEPAD_BUTTON_DOWN/UP (~156 presses), each ~1.6 ms: kept on purpose (buttons reach
+title hooks R3/L2/R2/Back and host commands).
+SAFETY FIX (round 3): trigger axes become L2/R2 presses in HandleGamepadAxisInput ->
+HandleGamepadInput (title hook: map/options read guest memory; host commands). Axis events were in
+the harmless list. Now EmuTriggerChanges: an axis event joins only when a trigger crosses its press
+threshold (hysteresis 12000/16000 as the host); sticks and trigger wobble still never join.

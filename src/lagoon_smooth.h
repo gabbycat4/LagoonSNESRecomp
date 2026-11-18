@@ -35,6 +35,10 @@ void LagoonSmooth_Draw(uint8_t *dst, size_t pitch, unsigned width, unsigned heig
 /* Second core ([Lagoon] SecondCore = 1, default; LAGOON_SECOND_CORE=0 turns it
  * off). alpha < 0 marks the field's base picture (composed, not shown). */
 int LagoonSmooth_SecondCore(void);
+/* Half-pixel pictures ([Lagoon] HalfPixels = 1, default with the second core;
+ * LAGOON_HALF_PIXELS=0 turns it off): 1 when a source_w x source_h picture
+ * should be presented at double size. */
+int LagoonSmooth_HalfPixels(int source_w, int source_h);
 void LagoonSmooth_BeginPicture(double alpha);
 /* The base picture may carry in-between pictures only when nothing else is
  * drawn over the scene (no fade, no loader, no Game Over panel). */

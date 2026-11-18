@@ -58,6 +58,11 @@ typedef struct State {
 
 static unsigned s_pps = 60;
 static int s_second_core = 1;           /* [Lagoon] SecondCore, LAGOON_SECOND_CORE */
+static int s_half_pixels = 1;           /* [Lagoon] HalfPixels, LAGOON_HALF_PIXELS */
+static uint32_t s_buf2[1024 * 2 * kHeight];
+static LagoonSceneMotion s_rendered2;
+static int s_rendered2_valid, s_half_ok;
+static unsigned s_rendered2_width;
 static int s_base_ok, s_calm, s_last_shift_x, s_last_shift_y;
 static unsigned s_base_width;
 static Record s_ring[kRing];
@@ -90,6 +95,7 @@ static void read_ini(const char *path) {
     while (n && isspace((unsigned char)name[n - 1])) name[--n] = 0;
     if (!strcmp(name, "PicturesPerSecond")) s_pps = valid_pps(strtol(value, NULL, 10));
     if (!strcmp(name, "SecondCore")) s_second_core = strtol(value, NULL, 10) != 0;
+    if (!strcmp(name, "HalfPixels")) s_half_pixels = strtol(value, NULL, 10) != 0;
   }
   fclose(f);
 }
@@ -105,12 +111,15 @@ void LagoonSmooth_AfterConfig(const char *config_path) {
   static int once;
   s_pps = 60;
   s_second_core = 1;
+  s_half_pixels = 1;
   read_ini(config_path);
   read_ini("config.local.ini");
   const char *env = getenv("LAGOON_PICTURES");
   if (env && *env) s_pps = valid_pps(strtol(env, NULL, 10));
   const char *core = getenv("LAGOON_SECOND_CORE");
   if (core && *core) s_second_core = strtol(core, NULL, 10) != 0;
+  const char *half = getenv("LAGOON_HALF_PIXELS");
+  if (half && *half) s_half_pixels = strtol(half, NULL, 10) != 0;
   if (!once) {
     once = 1;
     const char *path = getenv("LAGOON_SMOOTH_LOG");
@@ -126,12 +135,17 @@ void LagoonSmooth_AfterConfig(const char *config_path) {
 void LagoonSmooth_Reset(void) {
   s_have_to = s_have_from = s_have_pkt_from = s_checked = s_rendered_valid = 0;
   s_base_ok = 0;
+  s_rendered2_valid = 0;
   s_period = 2;
   memset(s_ring, 0, sizeof s_ring);
 }
 
 unsigned LagoonSmooth_PicturesPerSecond(void) { return s_pps; }
 int LagoonSmooth_SecondCore(void) { return s_pps > 60 && s_second_core; }
+int LagoonSmooth_HalfPixels(int source_w, int source_h) {
+  return s_pps > 60 && s_second_core && s_half_pixels && source_h == kHeight &&
+         source_w >= 256 && source_w * 2 <= 1024;
+}
 void LagoonSmooth_BeginPicture(double alpha) {
   s_last_shift_x = s_last_shift_y = 0;
   if (alpha < 0) s_base_ok = 0;
@@ -264,18 +278,26 @@ static void assign_owners(void) {
     s_obj_owner[i] = (int16_t)owner_of(s_pkt.objx[i], s_pkt.objy[i], 0, 0, 0, &unused);
 }
 
-/* The to-packet redrawn at fraction t. Returns 0 when the camera jumped. */
-static int positions_at(double t, LagoonSceneMotion *out) {
+static int floordiv(int a, int b) { int q = a / b; return (a % b != 0 && (a < 0) != (b < 0)) ? q - 1 : q; }
+
+/* The to-packet redrawn at fraction t, positions in 1/scale pixel (scale 1:
+ * whole pixels; scale 2: half pixels, the half recorded in the half_* bits).
+ * Returns 0 when the camera jumped. */
+static int positions_at_scaled(double t, LagoonSceneMotion *out, int scale) {
   if (!small(s_to.cx - s_from.cx) || !small(s_to.cy - s_from.cy)) return 0;
   State now;
   state_at(t, &now);
   *out = s_pkt;
-  int cx = (int)lround(now.cx), cy = (int)lround(now.cy);
+  /* The camera in units, and its whole-pixel part for the backgrounds. */
+  int ucx = (int)lround(scale * now.cx), ucy = (int)lround(scale * now.cy);
+  int cx = floordiv(ucx, scale), cy = floordiv(ucy, scale);
+  out->half_bg = (uint8_t)((ucx - scale * cx) | ((ucy - scale * cy) << 1));
   /* The whole packet (background AND sprites, both placed by the game with
    * its scroll) moves to the interpolated camera. The scroll can trail the
    * camera word by a field; moving both together keeps them in agreement. */
   int bx = cx - s_pkt.wx, by = cy - s_pkt.wy;
   if (!small(bx / 2.0) || !small(by / 2.0)) return 0;
+  int ubx = ucx - scale * s_pkt.wx, uby = ucy - scale * s_pkt.wy;   /* camera shift in units */
   out->wx = cx; out->wy = cy;
   out->native_x = s_pkt.native_x + bx; out->native_y = s_pkt.native_y + by;
   if (s_have_pkt_from && s_pkt.parallax && s_pkt_from.parallax) {
@@ -286,35 +308,43 @@ static int positions_at(double t, LagoonSceneMotion *out) {
   /* Screen position of a piece = its offset from its character in the
    * to-frame + where that character is now relative to the camera now. */
   for (unsigned i = 0; i < 128; ++i) {
+    out->half_o[i] = 0;
     if (!s_pkt.visible[i]) continue;
-    int k = s_owner[i], mx, my;
+    int k = s_owner[i], mx, my;   /* motion in units */
     if (k == kOwnerScreen) continue;  /* HUD: exactly where the game put it */
     if (k >= 0) {
-      mx = (int)lround(now.ax[k]) - s_rec_to.ax[k];
-      my = (int)lround(now.ay[k]) - s_rec_to.ay[k];
+      mx = (int)lround(scale * now.ax[k]) - scale * s_rec_to.ax[k];
+      my = (int)lround(scale * now.ay[k]) - scale * s_rec_to.ay[k];
     } else if (s_have_pkt_from && s_pkt_from.visible[i] && s_pkt_from.tile[i] == s_pkt.tile[i]) {
       /* No character nearby, same picture: its own motion in the world. */
       double wx1 = s_pkt.ox[i] + s_pkt.wx, wx0 = s_pkt_from.ox[i] + s_pkt_from.wx;
       double wy1 = sy(s_pkt.oy[i]) + s_pkt.wy, wy0 = sy(s_pkt_from.oy[i]) + s_pkt_from.wy;
       if (small(wx1 - wx0) && small(wy1 - wy0)) {
-        mx = (int)lround(lerp(wx0, wx1, t)) - (int)wx1;
-        my = (int)lround(lerp(wy0, wy1, t)) - (int)wy1;
+        mx = (int)lround(scale * lerp(wx0, wx1, t)) - scale * (int)wx1;
+        my = (int)lround(scale * lerp(wy0, wy1, t)) - scale * (int)wy1;
       } else mx = my = 0;
     } else mx = my = 0;  /* fixed in the world */
-    out->ox[i] = (int16_t)(s_pkt.ox[i] + mx - bx);
-    out->oy[i] = (uint8_t)((sy(s_pkt.oy[i]) + my - by) & 255);
+    int ux = scale * s_pkt.ox[i] + mx - ubx, uy = scale * sy(s_pkt.oy[i]) + my - uby;
+    int px = floordiv(ux, scale), py = floordiv(uy, scale);
+    out->ox[i] = (int16_t)px;
+    out->oy[i] = (uint8_t)(py & 255);
+    out->half_o[i] = (uint8_t)((ux - scale * px) | ((uy - scale * py) << 1));
   }
   for (unsigned i = 0; i < s_pkt.count; ++i) {
     int k = s_obj_owner[i], mx = 0, my = 0;
     if (k >= 0) {
-      mx = (int)lround(now.ax[k]) - s_rec_to.ax[k];
-      my = (int)lround(now.ay[k]) - s_rec_to.ay[k];
+      mx = (int)lround(scale * now.ax[k]) - scale * s_rec_to.ax[k];
+      my = (int)lround(scale * now.ay[k]) - scale * s_rec_to.ay[k];
     }
-    out->objx[i] = s_pkt.objx[i] + mx - bx;
-    out->objy[i] = s_pkt.objy[i] + my - by;
+    int ux = scale * s_pkt.objx[i] + mx - ubx, uy = scale * s_pkt.objy[i] + my - uby;
+    int px = floordiv(ux, scale), py = floordiv(uy, scale);
+    out->objx[i] = px; out->objy[i] = py;
+    out->half_obj[i] = (uint8_t)((ux - scale * px) | ((uy - scale * py) << 1));
   }
   return 1;
 }
+
+static int positions_at(double t, LagoonSceneMotion *out) { return positions_at_scaled(t, out, 1); }
 
 /* Where this picture sits within its field, by COUNT, not by clock: the host
  * shows pps/60 pictures per field, the last one just before the next field
@@ -369,6 +399,25 @@ static int check(const uint8_t *dst, size_t pitch, unsigned width) {
   return 1;
 }
 
+/* Self-check of the half-pixel renderer: at the packet's own positions (no
+ * half offsets) its double-size picture must equal the verified 1x picture
+ * in dst with every pixel doubled. */
+static int check2x(const uint8_t *dst, size_t pitch, unsigned width) {
+  s_rendered2_valid = 0;
+  if (width * 2 > 1024) return 0;
+  ++s_renders;
+  if (!LagoonSceneRenderer_RenderMotion2x(s_buf2, width, &s_pkt)) return 0;
+  for (unsigned y = 0; y < 2 * kHeight; ++y) {
+    const uint32_t *a = (const uint32_t *)(dst + (size_t)(y / 2) * pitch), *b = s_buf2 + (size_t)y * 2 * width;
+    for (unsigned x = 0; x < 2 * width; ++x)
+      if (a[x / 2] != b[x]) {
+        if (s_log) fprintf(s_log, "%u check2x-diff room=%x at x=%u y=%u\n", s_pkt.frame, s_pkt.room, x, y);
+        return 0;
+      }
+  }
+  return 1;
+}
+
 static void log_line(unsigned frame, double alpha, double t, int drawn, const char *why) {
   if (s_log) fprintf(s_log, "%u %.3f %.3f %d %s\n", frame, alpha, t, drawn, why);
 }
@@ -413,6 +462,10 @@ static void new_packet(const uint8_t *dst, size_t pitch, unsigned width) {
     packets_since_check = 0;
     s_checked = check(dst, pitch, width);
     if (s_checked > 0) ++s_checks_ok; else ++s_checks_failed;
+    if (s_checked > 0 && LagoonSmooth_HalfPixels((int)width, kHeight)) {
+      s_half_ok = check2x(dst, pitch, width);
+      if (!s_half_ok) ++s_checks_failed;
+    }
   }
   if (s_log && s_have_from)
     fprintf(s_log, "%u step-info room=%x tick=%x cam=%d,%d scroll-lag=%d,%d period=%u\n", s_pkt.frame,
@@ -475,12 +528,50 @@ int LagoonSmooth_DrawInbetween(uint8_t *dst, size_t pitch, unsigned width, unsig
    * module's state and the scene renderer's completed packet, both written
    * on the main thread while the guest was idle. */
   *shift_x = *shift_y = 0;
-  if (s_pps <= 60 || !dst || !s_base_ok || height != kHeight || width != s_base_width) {
+  int doubled = width == 2 * s_base_width && height == 2 * kHeight;
+  if (s_pps <= 60 || !dst || !s_base_ok || (!doubled && (height != kHeight || width != s_base_width))) {
     log_line(s_pkt.frame, alpha, 1, 0, "hold");
     return 0;
   }
   ++s_picture_in_field;
   double t = current_t(alpha);
+  if (doubled && !s_half_ok) {
+    /* The half-pixel self-check failed: whole-pixel picture, doubled. */
+    if (!positions_at(t, &s_pos)) { log_line(s_pkt.frame, alpha, t, 0, "jump"); return 0; }
+    ++s_renders;
+    if (!LagoonSceneRenderer_RenderMotion(s_buf, s_base_width, &s_pos)) return 0;
+    s_rendered_valid = 0;
+    for (unsigned y = 0; y < height; ++y) {
+      uint32_t *row = (uint32_t *)(dst + (size_t)y * pitch);
+      const uint32_t *src = s_buf + (size_t)(y / 2) * s_base_width;
+      for (unsigned x = 0; x < width; ++x) row[x] = src[x / 2];
+    }
+    ++s_drawn;
+    *shift_x = s_pos.wx - s_pkt.wx; *shift_y = s_pos.wy - s_pkt.wy;
+    log_line(s_pkt.frame, alpha, t, 1, "inbetween-doubled");
+    return 1;
+  }
+  if (doubled) {
+    /* Half-pixel picture: every 3 px step is six 0.5 px moves at 180. */
+    if (!positions_at_scaled(t, &s_pos, 2)) { log_line(s_pkt.frame, alpha, t, 0, "jump"); return 0; }
+    if (!s_rendered2_valid || s_rendered2_width != s_base_width || !same_draw(&s_rendered2, &s_pos) ||
+        s_rendered2.half_bg != s_pos.half_bg || memcmp(s_rendered2.half_o, s_pos.half_o, sizeof s_pos.half_o) ||
+        memcmp(s_rendered2.half_obj, s_pos.half_obj, s_pos.count)) {
+      ++s_renders;
+      if (!LagoonSceneRenderer_RenderMotion2x(s_buf2, s_base_width, &s_pos)) {
+        s_rendered2_valid = 0;
+        log_line(s_pkt.frame, alpha, t, 0, "render2x-refused");
+        return 0;
+      }
+      s_rendered2 = s_pos; s_rendered2_width = s_base_width; s_rendered2_valid = 1;
+    }
+    for (unsigned y = 0; y < height; ++y)
+      memcpy(dst + (size_t)y * pitch, s_buf2 + (size_t)y * width, (size_t)width * 4);
+    ++s_drawn;
+    *shift_x = s_pos.wx - s_pkt.wx; *shift_y = s_pos.wy - s_pkt.wy;
+    log_line(s_pkt.frame, alpha, t, 1, "inbetween-half-pixel");
+    return 1;
+  }
   if (!positions_at(t, &s_pos)) { log_line(s_pkt.frame, alpha, t, 0, "jump"); return 0; }
   if (!s_rendered_valid || s_rendered_width != width || !same_draw(&s_rendered, &s_pos)) {
     ++s_renders;

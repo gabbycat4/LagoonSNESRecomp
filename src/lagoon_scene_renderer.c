@@ -974,7 +974,8 @@ int LagoonSceneRenderer_Motion(LagoonSceneMotion *m){
   const ScenePacket *s=&s_packets[s_complete];
   if(!m||s_mode!=2||!s->valid||s->incoming_mosaic||!s_view_serial||s_view_serial!=s->serial||
      s->count>LAGOON_SCENE_MOTION_OBJECTS)return 0;
-  m->map_only=0;m->generation=s->generation;m->serial=s->serial;m->frame=s->frame;m->room=s->room;m->parallax=s->parallax;
+  m->map_only=0;m->half_bg=0;memset(m->half_o,0,sizeof m->half_o);memset(m->half_obj,0,sizeof m->half_obj);
+  m->generation=s->generation;m->serial=s->serial;m->frame=s->frame;m->room=s->room;m->parallax=s->parallax;
   m->wx=s->wx;m->wy=s->wy;m->native_x=(int)s->native_x;m->native_y=(int)s->native_y;
   m->bg2_x=(int)s->bg2_x;m->bg2_y=(int)s->bg2_y;
   for(unsigned slot=0;slot<128;++slot){
@@ -988,6 +989,78 @@ int LagoonSceneRenderer_Motion(LagoonSceneMotion *m){
     m->objorder[i]=s->objects[i].order;m->objslot[i]=s->objects[i].slot;
   }
   return 1;
+}
+/* gabbycat4 half-pixel drawing: render_into at double resolution. The
+ * backgrounds are decoded once per source row at 1x (one extra column/row)
+ * and doubled with a half-pixel shift; sprites and scene objects are placed
+ * on the 2x grid with their own half-pixel offsets; the BG3 HUD stays fixed.
+ * Same priority rules and order as render_into (sprites over BG by priority,
+ * BG3 over both, finite-room blanking). Never used for mosaic packets. */
+static void render_into_2x(const ScenePacket *s,unsigned width,uint32_t *out,const LagoonSceneMotion *pos) {
+  int left=(int)(width-256)/2;
+  unsigned W2=width*2;
+  int hbx=pos->half_bg&1,hby=(pos->half_bg>>1)&1;
+  static uint8_t bdepth[W+8];static uint16_t bcol[W+8];
+  static uint64_t rank[2*W];static uint16_t obj[2*W];static uint8_t prio[2*W];
+  int cached=-1;
+  for(unsigned Y=0;Y<2*H;++Y) {
+    int y=((int)Y+hby)>>1;               /* source background row */
+    if(y!=cached) {
+      memset(bdepth,0,width+1);
+      for(unsigned x=0;x<=width;++x)bcol[x]=s->pal[0];
+      background_row(s,width+1,y,left,0,bdepth,bcol);
+      background_row(s,width+1,y,left,1,bdepth,bcol);
+      cached=y;
+    }
+    for(unsigned X=0;X<W2;++X){rank[X]=UINT64_MAX;prio[X]=0;obj[X]=0;}
+    for(unsigned slot=0;slot<128;++slot) {
+      if(!s->policy.allow[slot])continue;
+      const uint8_t *o=(const uint8_t *)s->oam+slot*4;
+      unsigned high=(s->high[slot/4]>>((slot%4)*2))&3,n=(high&2)?16:8;
+      int hx=pos->half_o[slot]&1,hy=(pos->half_o[slot]>>1)&1;
+      unsigned dyh=((unsigned)Y-(2u*o[1]+(unsigned)hy))&511;if(dyh>=2*n)continue;
+      unsigned dy=dyh>>1;
+      int ox=s->policy.x[slot];
+      unsigned tile=o[2]|o[3]<<8,sy=(tile&0x8000)?n-1-dy:dy;
+      for(unsigned dxh=0;dxh<2*n;++dxh) {
+        int nx2=2*ox+hx+(int)dxh,X=2*left+nx2;
+        if((nx2<0&&s->policy.clip_left[slot])||X<0||X>=(int)W2)continue;
+        uint64_t order=(uint64_t)slot<<32;if(order>=rank[X])continue;
+        unsigned dx=dxh>>1,sx=(tile&0x4000)?n-1-dx:dx;
+        unsigned ch=(((((tile&255)>>4)+(sy>>3))<<4)|(((tile&15)+(sx>>3))&15));
+        unsigned c=graphics(s,ch,sx&7,sy&7,(tile&0x100)?0x5000:0x4000,4);
+        if(c){rank[X]=order;prio[X]=2+4*((tile>>12)&3);obj[X]=s->pal[128+((tile>>9)&7)*16+c];}
+      }
+    }
+    for(unsigned i=0;i<s->count;++i) {
+      const SceneObject *a=&s->objects[i];
+      int hx=pos->half_obj[i]&1,hy=(pos->half_obj[i]>>1)&1;
+      int dyh=(int)Y-(2*a->y+hy);if(dyh<0||dyh>=2*a->height)continue;
+      int dy=dyh>>1;
+      for(int dxh=0;dxh<2*a->width;++dxh) {
+        int X=2*(a->x+left)+hx+dxh;if(X<0||X>=(int)W2)continue;
+        uint16_t c=a->pixels[dy*a->width+(dxh>>1)];uint64_t order=((uint64_t)a->slot<<32)|a->order;
+        if((c&0x8000)&&order<rank[X]){rank[X]=order;prio[X]=2+4*a->priority;obj[X]=c&0x7fff;}
+      }
+    }
+    uint32_t *row=out+(size_t)Y*W2;
+    unsigned yy=(Y>>1)+1;
+    for(unsigned X=0;X<W2;++X) {
+      unsigned x=(X+(unsigned)hbx)>>1;          /* source background column */
+      uint8_t depth=bdepth[x];uint16_t color=bcol[x];
+      if(prio[X]>depth){depth=prio[X];color=obj[X];}
+      int hx=(int)(X>>1)-left;                  /* BG3 HUD column, not shifted */
+      if(hx>=0&&hx<256) {
+        unsigned tile=s->vram[0x3c00+(yy/8)*32+(unsigned)hx/8],palette=((tile>>10)&7)*4,pz=(tile&0x2000)?15:1;
+        unsigned c=graphics(s,tile,(unsigned)hx&7,yy&7,0x6000,2);   /* graphics() mirrors flipped tiles */
+        if(c&&pz>depth)color=s->pal[palette+c];
+      }
+      int outside=(s->parallax||s->finite_clip)&&((int)x<left||(int)x>=left+256)&&
+        (s->wx+(int)x-left<0||s->wx+(int)x-left>=s->world_width||
+         s->wy+y<0||s->wy+y>=s->world_height);
+      row[X]=outside?0:s_rgb15[color&32767];
+    }
+  }
 }
 int LagoonSceneRenderer_RenderMotion(uint32_t *out,unsigned width,const LagoonSceneMotion *pos){
   ScenePacket *s=&s_packets[s_complete];
@@ -1006,6 +1079,28 @@ int LagoonSceneRenderer_RenderMotion(uint32_t *out,unsigned width,const LagoonSc
   }
   for(unsigned i=0;i<s->count;++i){s->objects[i].x=pos->objx[i];s->objects[i].y=pos->objy[i];}
   s_motion_render=pos->map_only?2:1;render_into(s,width,out,0);s_motion_render=0;
+  s->wx=wx;s->wy=wy;s->native_x=nx;s->native_y=ny;s->bg2_x=bx;s->bg2_y=by;
+  memcpy(s->policy.x,ox,sizeof ox);memcpy(s->oam,oam,sizeof oam);
+  for(unsigned i=0;i<s->count;++i){s->objects[i].x=objx[i];s->objects[i].y=objy[i];}
+  return 1;
+}
+
+int LagoonSceneRenderer_RenderMotion2x(uint32_t *out,unsigned width,const LagoonSceneMotion *pos){
+  ScenePacket *s=&s_packets[s_complete];
+  if(!out||!pos||!s->valid||s->incoming_mosaic||s->serial!=pos->serial||s->count!=pos->count||
+     width<256||width>512||width%2)return 0;
+  int wx=s->wx,wy=s->wy;unsigned nx=s->native_x,ny=s->native_y,bx=s->bg2_x,by=s->bg2_y;
+  s_motion_wx0=wx;s_motion_wy0=wy;
+  int16_t ox[128];uint16_t oam[256];static int32_t objx[OBJECTS],objy[OBJECTS];
+  memcpy(ox,s->policy.x,sizeof ox);memcpy(oam,s->oam,sizeof oam);
+  for(unsigned i=0;i<s->count;++i){objx[i]=s->objects[i].x;objy[i]=s->objects[i].y;}
+  s->wx=pos->wx;s->wy=pos->wy;s->native_x=(unsigned)pos->native_x;s->native_y=(unsigned)pos->native_y;
+  s->bg2_x=(unsigned)pos->bg2_x;s->bg2_y=(unsigned)pos->bg2_y;
+  for(unsigned slot=0;slot<128;++slot){
+    s->policy.x[slot]=pos->ox[slot];((uint8_t *)s->oam)[slot*4+1]=pos->oy[slot];
+  }
+  for(unsigned i=0;i<s->count;++i){s->objects[i].x=pos->objx[i];s->objects[i].y=pos->objy[i];}
+  s_motion_render=pos->map_only?2:1;render_into_2x(s,width,out,pos);s_motion_render=0;
   s->wx=wx;s->wy=wy;s->native_x=nx;s->native_y=ny;s->bg2_x=bx;s->bg2_y=by;
   memcpy(s->policy.x,ox,sizeof ox);memcpy(s->oam,oam,sizeof oam);
   for(unsigned i=0;i<s->count;++i){s->objects[i].x=objx[i];s->objects[i].y=objy[i];}

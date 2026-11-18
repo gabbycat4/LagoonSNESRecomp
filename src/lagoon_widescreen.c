@@ -220,6 +220,8 @@ void LagoonWide_ViewBounds(const uint8_t *r,int extra,int *l,int *t,int *right,i
 }
 void LagoonWide_PresentationGeometry(int sw,int sh,int *w,int *h){
   *w=sw;*h=sh;
+  /* gabbycat4: half-pixel pictures are presented at double size (zoom 1x). */
+  if(g_config.widescreen&&s_zoom==100&&LagoonSmooth_HalfPixels(sw,sh)){*w=sw*2;*h=sh*2;return;}
   if(g_config.widescreen&&sh==224&&s_zoom!=100){*w=(sw*(int)s_zoom/100)&~1;*h=224*(int)s_zoom/100;}
 }
 void LagoonWide_PresentationCompose(uint8_t *dst,size_t pitch,int w,int h,

@@ -45,7 +45,7 @@
    profile_start = ProfileStart();
    if (g_config.output_method != kOutputMethod_OpenGL && g_game->renderer_capture) {
      const char *path = DisplayScreenshotPath(g_present_frame);
-@@ -3812,6 +3826,180 @@
+@@ -3812,6 +3826,235 @@
  #endif
  }
  
@@ -84,6 +84,10 @@
 +  double seconds;         /* the last job's guest time (worker-written) */
 +  unsigned long long jobs, waits;
 +  double total, max, waited;
++  /* why the guest had to be idle early: queued event types (diagnostics) */
++  unsigned event_type[8];
++  unsigned long long event_joins[8], event_joins_other;
++  double event_waited;
 +} g_emu;
 +
 +static int SDLCALL EmuWorkerMain(void *unused) {
@@ -150,35 +154,84 @@
 +    SDL_WaitThread(g_emu.thread, NULL);
 +    g_emu.thread = NULL;
 +  }
-+  if (g_emu.jobs)
++  if (g_emu.jobs) {
 +    fprintf(stderr, "[second-core] jobs=%llu guest_mean_ms=%.3f guest_max_ms=%.3f "
-+            "joins_that_waited=%llu waited_ms=%.1f\n", g_emu.jobs,
++            "joins_that_waited=%llu waited_ms=%.1f (of which for events %.1f)\n", g_emu.jobs,
 +            1000.0 * g_emu.total / (double)g_emu.jobs, 1000.0 * g_emu.max,
-+            g_emu.waits, 1000.0 * g_emu.waited);
++            g_emu.waits, 1000.0 * g_emu.waited, 1000.0 * g_emu.event_waited);
++    for (int i = 0; i < 8 && g_emu.event_joins[i]; ++i)
++      fprintf(stderr, "[second-core] early joins for event type 0x%x: %llu\n",
++              g_emu.event_type[i], g_emu.event_joins[i]);
++    if (g_emu.event_joins_other)
++      fprintf(stderr, "[second-core] early joins for other event types: %llu\n", g_emu.event_joins_other);
++  }
 +}
 +
 +/* Queued events that may touch the guest (keys, buttons, window, quit...).
 + * Pure motion/sensor events only update host input state: a pad's stick
 + * noise must not force the guest idle every picture. */
++static void EmuNoteEventJoin(unsigned type) {
++  for (int i = 0; i < 8; ++i) {
++    if (g_emu.event_type[i] == type || !g_emu.event_joins[i]) {
++      g_emu.event_type[i] = type; ++g_emu.event_joins[i]; return;
++    }
++  }
++  ++g_emu.event_joins_other;
++}
++
++/* A trigger crossing its press threshold becomes an L2/R2 button press
++ * (HandleGamepadAxisInput -> HandleGamepadInput: title hooks, commands).
++ * Stick motion and trigger wobble only update host input state. */
++static bool EmuTriggerChanges(const SDL_Event *e) {
++  GamepadInfo *gi;
++  int axis, value;
++  if (e->type == SDL_CONTROLLERAXISMOTION) {
++    gi = GetGamepadInfo(SNESRECOMP_SDL_EVENT_AXIS_DEVICE(*e));
++    axis = SNESRECOMP_SDL_EVENT_AXIS(*e);
++    value = SNESRECOMP_SDL_EVENT_AXIS_VALUE(*e);
++  } else {
++    gi = GetGamepadInfo(e->jaxis.which);
++    if (!gi || !gi->raw_joystick) return false;
++    axis = e->jaxis.axis;
++    value = e->jaxis.value;
++  }
++  if (!gi) return false;
++  if (axis != SDL_CONTROLLER_AXIS_TRIGGERLEFT && axis != SDL_CONTROLLER_AXIS_TRIGGERRIGHT) return false;
++  if (value >= 12000 && value < 16000) return false;   /* hysteresis band: ignored */
++  int button = axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT ? kGamepadBtn_L2 : kGamepadBtn_R2;
++  return !!(gi->modifiers & (1u << button)) != (value >= 12000);
++}
++
 +static bool EmuEventsNeedIdleGuest(void) {
 +  SDL_Event ev[32];
 +  SDL_PumpEvents();
 +  int n = SDL_PeepEvents(ev, 32, SDL_PEEKEVENT, EMU_EVENT_FIRST, EMU_EVENT_LAST);
-+  if (n >= 32) return true;
++  if (n >= 32) { EmuNoteEventJoin(0xFFFFu); return true; }
 +  for (int i = 0; i < n; ++i) {
 +    switch (ev[i].type) {
 +#if SNESRECOMP_SDL3
-+      case SDL_EVENT_MOUSE_MOTION: case SDL_EVENT_JOYSTICK_AXIS_MOTION:
-+      case SDL_EVENT_JOYSTICK_BALL_MOTION: case SDL_EVENT_GAMEPAD_AXIS_MOTION:
-+      case SDL_EVENT_GAMEPAD_TOUCHPAD_MOTION: case SDL_EVENT_GAMEPAD_SENSOR_UPDATE:
-+      case SDL_EVENT_SENSOR_UPDATE:
-+#else
-+      case SDL_MOUSEMOTION: case SDL_JOYAXISMOTION: case SDL_JOYBALLMOTION:
-+      case SDL_CONTROLLERAXISMOTION: case SDL_CONTROLLERTOUCHPADMOTION:
-+      case SDL_CONTROLLERSENSORUPDATE: case SDL_SENSORUPDATE:
-+#endif
++      case SDL_EVENT_JOYSTICK_AXIS_MOTION: case SDL_EVENT_GAMEPAD_AXIS_MOTION:
++        if (EmuTriggerChanges(&ev[i])) { EmuNoteEventJoin((unsigned)ev[i].type); return true; }
 +        break;
++      case SDL_EVENT_MOUSE_MOTION:
++      case SDL_EVENT_JOYSTICK_BALL_MOTION: case SDL_EVENT_JOYSTICK_HAT_MOTION:
++      case SDL_EVENT_JOYSTICK_BATTERY_UPDATED: case SDL_EVENT_JOYSTICK_UPDATE_COMPLETE:
++      case SDL_EVENT_GAMEPAD_UPDATE_COMPLETE:
++      case SDL_EVENT_GAMEPAD_TOUCHPAD_MOTION: case SDL_EVENT_GAMEPAD_SENSOR_UPDATE:
++      case SDL_EVENT_SENSOR_UPDATE: case SDL_EVENT_FINGER_MOTION:
++      case SDL_EVENT_PEN_MOTION: case SDL_EVENT_PEN_AXIS: case SDL_EVENT_CLIPBOARD_UPDATE:
++#else
++      case SDL_JOYAXISMOTION: case SDL_CONTROLLERAXISMOTION:
++        if (EmuTriggerChanges(&ev[i])) { EmuNoteEventJoin((unsigned)ev[i].type); return true; }
++        break;
++      case SDL_MOUSEMOTION: case SDL_JOYBALLMOTION:
++      case SDL_JOYHATMOTION:
++      case SDL_CONTROLLERTOUCHPADMOTION: case SDL_CONTROLLERSENSORUPDATE:
++      case SDL_SENSORUPDATE: case SDL_FINGERMOTION:
++#endif
++        break;   /* host input state only: never touches the guest */
 +      default:
++        EmuNoteEventJoin((unsigned)ev[i].type);
 +        return true;
 +    }
 +  }
@@ -203,12 +256,14 @@
 +  ProfileEnd(kProfileAcquire, profile_start);
 +  if (!buffer) { g_renderer_funcs.EndDraw(); return; }
 +  profile_start = ProfileStart();
-+  static uint8 inbetween[kSnesDesktopMaxFrameWidth * 240 * 4];
++  static uint8 inbetween[kSnesDesktopMaxFrameWidth * 480 * 4];
 +  bool drawn = false;
-+  if (g_game->draw_inbetween && w == g_snes_width && h == g_snes_height &&
-+      w <= kSnesDesktopMaxFrameWidth && h <= 240 &&
++  /* The picture is the frame size, or double it (half-pixel pictures). */
++  const int doubled = w == 2 * g_snes_width && h == 2 * g_snes_height;
++  if (g_game->draw_inbetween && (doubled || (w == g_snes_width && h == g_snes_height)) &&
++      w <= kSnesDesktopMaxFrameWidth && h <= 480 &&
 +      g_game->draw_inbetween(inbetween, (size_t)w * 4, g_my_pixels, w, h, g_present_alpha)) {
-+    ComposeOsd(inbetween, w * 4, w, h, 2);
++    ComposeOsd(inbetween, w * 4, w, h, doubled ? 1 : 2);
 +    for (int y = 0; y < h; ++y)
 +      memcpy(buffer + (size_t)y * pitch, inbetween + (size_t)y * w * 4, (size_t)w * 4);
 +    drawn = true;
@@ -226,17 +281,21 @@
  int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc, char **argv) {
    if (!game || !game->game_info || !game->display_name) {
      fprintf(stderr, "snesrecomp_desktop_main: descriptor needs display_name and game_info\n");
-@@ -4657,6 +4845,9 @@
+@@ -4657,6 +4900,13 @@
       * whole crash-capture pipeline (minidump + report + crash copy). */
      host_report_crash_test_tick();
  
 +    /* gabbycat4 second core: events may load states, reset or open menus;
 +     * handle them only while the guest is idle. */
-+    if (g_emu.state == 1 && EmuEventsNeedIdleGuest()) EmuJoin();
++    if (g_emu.state == 1 && EmuEventsNeedIdleGuest()) {
++      double before = g_emu.waited;
++      EmuJoin();
++      g_emu.event_waited += g_emu.waited - before;
++    }
      ProfileStamp event_profile_start = ProfileStart();
      while (SDL_PollEvent(&event)) {
        if (HandleDeviceEvent(&event))
-@@ -4869,24 +5060,52 @@
+@@ -4869,24 +5119,52 @@
        snes_host_clock_reset(&video_clock, video_now, g_simulation_hz, presentation_hz);
        g_reset_clock = false;
      }
@@ -293,7 +352,7 @@
      /* Input-source assignments apply to each keyboard map independently. */
      PollKeyboardControls(snesrecomp_sdl_get_keyboard_state());
  
-@@ -5058,6 +5277,8 @@
+@@ -5058,6 +5336,8 @@
       * than a branch. Never during turbo: speculating about frames that are
       * being skipped costs work for a picture nobody is reading. */
      bool runahead_captured = false;
@@ -302,7 +361,7 @@
      {
        const uint32 word = inputs | GetActiveControllers() | debug_server_get_controller_active_mask();
        if (InputTraceEnabled()) {
-@@ -5068,7 +5289,12 @@
+@@ -5068,7 +5348,12 @@
            fflush(stderr);
          }
        }
@@ -316,7 +375,7 @@
          RtlRunFrame(word);
        else
          runahead_captured = true;   /* it rasterised the speculated frame */
-@@ -5126,10 +5352,45 @@
+@@ -5126,10 +5411,45 @@
        bool keep_debt = game->keep_pacing_debt && game->keep_pacing_debt();
        snes_host_clock_simulation_done(&video_clock, MonotonicSeconds(), keep_debt,
                                        RtlLastFramePeriods());
@@ -363,7 +422,7 @@
          (!paced_custom || snes_host_clock_presentation_due(&video_clock, MonotonicSeconds()) ||
           (run_frames && frameCtr >= run_frames))) {
        double presented_at = MonotonicSeconds();
-@@ -5145,6 +5406,7 @@
+@@ -5145,6 +5465,7 @@
      }
    }
  

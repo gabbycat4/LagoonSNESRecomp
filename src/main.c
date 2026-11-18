@@ -514,8 +514,39 @@ static int LagoonHost_DrawFrame(uint8_t *dst,size_t pitch,const uint8_t *field,i
     LagoonBossHud_Draw(dst,pitch,field,(size_t)width*4,(unsigned)width,(unsigned)height,RtlStateGeneration());
     return 1;
 }
+/* gabbycat4 half-pixel pictures: 1x overlays (boss bar, cameo, toast) drawn on
+ * a keyed layer and doubled over a 2x picture. The key is a colour no
+ * overlay produces (frames are opaque RGB with a zero alpha byte). */
+enum { LAGOON_OVERLAY_KEY = 0x5A0C0FFEu };
+static uint32_t lagoon_overlay_layer[512*224];
+static void LagoonHost_DrawOverlays1x(uint8_t *dst,size_t pitch,const uint8_t *field,int width,int height,int sx,int sy,int boss_hud){
+    if(boss_hud)LagoonBossHud_Draw(dst,pitch,field,(size_t)width*4,(unsigned)width,(unsigned)height,RtlStateGeneration());
+    if(!present("LAGOON_EASTER_EGG_DISABLE"))
+        LagoonEasterEgg_DrawView(dst,pitch,(unsigned)width,(unsigned)height,SDL_GetTicks(),RtlStateGeneration(),(width-256)/2-sx,-sy);
+    const uint32_t *image;int iw,ih;
+    if(LagoonAchievementUI_ToastImage(&image,&iw,&ih)&&iw<=width&&ih<=height){
+        int x=width-iw-4,y=4;if(x<0)x=0;
+        for(int row=0;row<ih;row++)memcpy(dst+(size_t)(y+row)*pitch+(size_t)x*4,image+(size_t)row*iw,(size_t)iw*4);
+    }
+}
+static void LagoonHost_Double(uint8_t *dst,size_t pitch,const uint32_t *src,size_t src_pitch_px,int sw,int sh,int keyed){
+    for(int y=0;y<sh;y++){
+        const uint32_t *s=src+(size_t)y*src_pitch_px;
+        uint32_t *a=(uint32_t*)(dst+(size_t)(2*y)*pitch),*b=(uint32_t*)(dst+(size_t)(2*y+1)*pitch);
+        for(int x=0;x<sw;x++){uint32_t c=s[x];if(keyed&&c==LAGOON_OVERLAY_KEY)continue;a[2*x]=a[2*x+1]=b[2*x]=b[2*x+1]=c;}
+    }
+}
+
 static void LagoonHost_PresentationCompose(uint8_t *dst,size_t pitch,int width,int height,
     const uint8_t *src,size_t sp,int sw,int sh){
+    if(width==2*sw&&height==2*sh&&sw<=512&&sh==224&&LagoonSmooth_HalfPixels(sw,sh)){
+        /* An ordinary (not in-between) picture at double size: the 1x picture
+         * with the cameo and toast, every pixel doubled. */
+        for(int y=0;y<sh;y++)memcpy(lagoon_overlay_layer+(size_t)y*sw,src+(size_t)y*sp,(size_t)sw*4);
+        LagoonHost_DrawOverlays1x((uint8_t*)lagoon_overlay_layer,(size_t)sw*4,NULL,sw,sh,0,0,0);
+        LagoonHost_Double(dst,pitch,lagoon_overlay_layer,(size_t)sw,sw,sh,0);
+        return;
+    }
     LagoonWide_PresentationCompose(dst,pitch,width,height,src,sp,sw,sh);
     int left=(width-256)/2,top=0;
     int placed=(width!=sw||height!=sh)&&LagoonSceneRenderer_ViewPlacement(width,height,RtlStateGeneration(),&left,&top);
@@ -545,6 +576,14 @@ static void LagoonHost_PresentationCompose(uint8_t *dst,size_t pitch,int width,i
 static int LagoonHost_DrawInbetween(uint8_t *dst,size_t pitch,const uint8_t *field,int width,int height,double alpha){
     int sx=0,sy=0;
     if(!LagoonSmooth_DrawInbetween(dst,pitch,(unsigned)width,(unsigned)height,alpha,&sx,&sy))return 0;
+    if(height==448&&width<=1024){
+        /* Half-pixel picture: overlays on a keyed 1x layer, doubled on top. */
+        int w1=width/2,h1=height/2;
+        for(size_t i=0;i<(size_t)w1*h1;i++)lagoon_overlay_layer[i]=LAGOON_OVERLAY_KEY;
+        LagoonHost_DrawOverlays1x((uint8_t*)lagoon_overlay_layer,(size_t)w1*4,field,w1,h1,sx,sy,1);
+        LagoonHost_Double(dst,pitch,lagoon_overlay_layer,(size_t)w1,w1,h1,1);
+        return 1;
+    }
     LagoonBossHud_Draw(dst,pitch,field,(size_t)width*4,(unsigned)width,(unsigned)height,RtlStateGeneration());
     if(!present("LAGOON_EASTER_EGG_DISABLE"))
         LagoonEasterEgg_DrawView(dst,pitch,(unsigned)width,(unsigned)height,SDL_GetTicks(),RtlStateGeneration(),(width-256)/2-sx,-sy);
