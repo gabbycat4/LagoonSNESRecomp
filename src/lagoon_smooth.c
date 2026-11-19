@@ -59,6 +59,11 @@ typedef struct State {
 static unsigned s_pps = 60;
 static int s_second_core = 1;           /* [Lagoon] SecondCore, LAGOON_SECOND_CORE */
 static int s_half_pixels = 1;           /* [Lagoon] HalfPixels, LAGOON_HALF_PIXELS */
+static int s_smooth_camera = 1;         /* [Lagoon] SmoothCamera, LAGOON_SMOOTH_CAMERA */
+enum { kCamAvg = 16 };
+static double s_camq[kCamAvg][2];
+static unsigned s_camq_n, s_camq_pos, s_camq_frame, s_camq_pic;
+static double s_camq_t = -1, s_cam_out[2];
 static uint32_t s_buf2[1024 * 2 * kHeight];
 static LagoonSceneMotion s_rendered2;
 static int s_rendered2_valid, s_half_ok;
@@ -119,6 +124,7 @@ static void read_ini(const char *path) {
     if (!strcmp(name, "PicturesPerSecond")) s_pps = valid_pps(strtol(value, NULL, 10));
     if (!strcmp(name, "SecondCore")) s_second_core = strtol(value, NULL, 10) != 0;
     if (!strcmp(name, "HalfPixels")) s_half_pixels = strtol(value, NULL, 10) != 0;
+    if (!strcmp(name, "SmoothCamera")) s_smooth_camera = strtol(value, NULL, 10) != 0;
   }
   fclose(f);
 }
@@ -141,6 +147,8 @@ void LagoonSmooth_AfterConfig(const char *config_path) {
   if (env && *env) s_pps = valid_pps(strtol(env, NULL, 10));
   const char *core = getenv("LAGOON_SECOND_CORE");
   if (core && *core) s_second_core = strtol(core, NULL, 10) != 0;
+  const char *scam = getenv("LAGOON_SMOOTH_CAMERA");
+  if (scam && *scam) s_smooth_camera = strtol(scam, NULL, 10) != 0;
   const char *half = getenv("LAGOON_HALF_PIXELS");
   if (half && *half) s_half_pixels = strtol(half, NULL, 10) != 0;
   if (!once) {
@@ -158,6 +166,7 @@ void LagoonSmooth_AfterConfig(const char *config_path) {
 void LagoonSmooth_Reset(void) {
   s_have_to = s_have_from = s_have_pkt_from = s_checked = s_rendered_valid = 0;
   s_have_last = 0;
+  s_camq_n = 0;
   s_base_ok = 0;
   s_rendered2_valid = 0;
   s_period = 2;
@@ -382,6 +391,45 @@ static void assign_owners(void) {
   s_last = s_pkt; memcpy(s_last_owner, s_owner, sizeof s_last_owner); s_have_last = 1;
 }
 
+/* Steady camera (Nov 19). The game's camera follows Nasir's PREVIOUS step,
+ * so on a diagonal walk (right, down, right, down) it moves 3 px, stops a step,
+ * moves 3 px: at 30 Hz invisible, smoothed it made the whole scene glide-stop-
+ * glide -- the guards by the gate and the house doors "jumped" (28 start/stops
+ * near the guards in one walk, 1 elsewhere). The stop-go cycle is two steps
+ * long, so the VIEW is averaged over the last four fields (12 pictures at
+ * 180/s); the world (Nasir, everyone) is not touched. At most 4 px from the
+ * game's camera; restarts after a jump. */
+
+static void steady_camera(double t, State *now) {
+  if (!s_smooth_camera) return;
+  unsigned want = s_pps / 15;   /* pictures in four fields = two game steps */
+  if (want > kCamAvg) want = kCamAvg;
+  if (want < 2) return;
+  if (s_camq_frame == s_pkt.frame && s_camq_pic == s_picture_in_field && s_camq_t == t) {
+    now->cx = s_cam_out[0]; now->cy = s_cam_out[1]; return;   /* same picture again */
+  }
+  if (s_camq_n) {
+    const double *last = s_camq[(s_camq_pos + kCamAvg - 1) % kCamAvg];
+    if (fabs(now->cx - last[0]) > kMaxStep || fabs(now->cy - last[1]) > kMaxStep) s_camq_n = 0;
+  }
+  s_camq[s_camq_pos][0] = now->cx; s_camq[s_camq_pos][1] = now->cy;
+  s_camq_pos = (s_camq_pos + 1) % kCamAvg;
+  if (s_camq_n < want) ++s_camq_n;
+  double ax = 0, ay = 0;
+  for (unsigned i = 0; i < s_camq_n; ++i) {
+    const double *q = s_camq[(s_camq_pos + kCamAvg - 1 - i) % kCamAvg];
+    ax += q[0]; ay += q[1];
+  }
+  ax /= s_camq_n; ay /= s_camq_n;
+  if (ax > now->cx + 4) ax = now->cx + 4;
+  if (ax < now->cx - 4) ax = now->cx - 4;
+  if (ay > now->cy + 4) ay = now->cy + 4;
+  if (ay < now->cy - 4) ay = now->cy - 4;
+  now->cx = ax; now->cy = ay;
+  s_camq_frame = s_pkt.frame; s_camq_pic = s_picture_in_field; s_camq_t = t;
+  s_cam_out[0] = ax; s_cam_out[1] = ay;
+}
+
 static int floordiv(int a, int b) { int q = a / b; return (a % b != 0 && (a < 0) != (b < 0)) ? q - 1 : q; }
 
 /* The to-packet redrawn at fraction t, positions in 1/scale pixel (scale 1:
@@ -391,6 +439,7 @@ static int positions_at_scaled(double t, LagoonSceneMotion *out, int scale) {
   if (!small(s_to.cx - s_from.cx) || !small(s_to.cy - s_from.cy)) return 0;
   State now;
   state_at(t, &now);
+  steady_camera(t, &now);
   *out = s_pkt;
   /* The camera in units, and its whole-pixel part for the backgrounds. */
   int ucx = (int)lround(scale * now.cx), ucy = (int)lround(scale * now.cy);
@@ -569,6 +618,7 @@ static void new_packet(const uint8_t *dst, size_t pitch, unsigned width) {
   if (!same_scene) {
     s_pkt = s_cur; s_rec_to = *rec; state_from_record(&s_to, rec); set_sprite_ref(rec, 1);
     s_have_last = 0;   /* new scene: no owners to keep */
+    s_camq_n = 0;      /* and no camera history */
     s_have_to = 1; s_have_from = s_have_pkt_from = 0; s_step_frame = s_cur.frame; s_step_real = 0;
   } else if (rec->tick == s_rec_to.tick) {
     /* Same game step (the in-between field): new pose/graphics, same motion.

@@ -506,3 +506,15 @@ town guards and the house doors still look jumpy when Nasir walks past.
   slowdown = giving the game's main loop more CPU time per field without touching the APU
   clock/audio. Medium-to-large, needs care (AI/RNG timing, audio sync, savestates, the port's
   own native timing paths).
+
+Round 7 (Nov 19): steady camera. A/B with LAGOON_HALF_PIXELS=0: guards/doors still jump -> not
+the half-pixel renderer. Session 6 (walk past the gate guards): the game's camera follows Nasir's
+PREVIOUS step; on a diagonal walk (right, down, right, down) it moves 3 px, stops a step, moves
+3 px (frames 2352-2380). 28 camera start/stops near the guards vs 1 elsewhere. Smoothed, the
+whole scene glided-stopped-glided; the big still things (gate guards, house doors) showed it.
+- steady_camera(): the VIEW is averaged over the last 4 fields (2 game steps, 12 pictures at
+  180/s), at most 4 px from the game's camera, restarted on jumps/new scenes. The world is not
+  touched (actors, sprites in world coordinates unchanged; reversal counts identical).
+- [Lagoon] SmoothCamera=1 (default), LAGOON_SMOOTH_CAMERA=0 for the game's own camera.
+- Session 6 town camera per field: 3 3 0 0 3 3 0 0 -> 1 1 2 3 2 2 1 2 1 2; sudden full<->stop
+  jumps 23 -> 0; sessions 3-5: 0 -> 0. t8, t2x/t2h/t2v/t1c PASS; compile clean.
