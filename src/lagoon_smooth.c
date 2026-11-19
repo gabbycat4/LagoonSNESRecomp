@@ -44,7 +44,7 @@ typedef struct Record {
   unsigned frame, valid;
   uint8_t tick;
   int cx, cy;
-  uint8_t live[kActors];
+  uint8_t live[kActors], type[kActors];
   int ax[kActors], ay[kActors];
 } Record;
 
@@ -67,10 +67,33 @@ static int s_base_ok, s_calm, s_last_shift_x, s_last_shift_y;
 static unsigned s_base_width;
 static Record s_ring[kRing];
 static Record s_rec_to;
+/* Sprite reference: the game builds its sprite list one field LATE, from the
+ * previous field's actor positions AND the previous field's camera word
+ * (measured: 66 of 67 moving fields; backgrounds use the current scroll).
+ * Pieces are placed relative to that record and that camera, not to the
+ * packet's scroll. With the camera standing still (church, map edges) the old
+ * reference put Nasir one step off on every other field: a double image. */
+enum { kCamBaseX = 0, kCamBaseY = -1 };  /* camera word - packet origin, scroll not trailing */
+static Record s_spr, s_spr_from;
+static int s_spr_ox, s_spr_oy, s_spr_from_ox, s_spr_from_oy;
+/* The game rebuilds its sprite list only on step fields (measured Nov 19:
+ * the list is unchanged on 3635 of 3683 in-between fields in town, 675 of
+ * 677 in the cave). An unchanged list keeps the reference of the field that
+ * built it: Nasir's record/camera from the field BEFORE that one, and for
+ * every other piece that field's record and scroll. */
+static Record s_ref_rec;
+static int s_ref_wx, s_ref_wy, s_ref_from_wx, s_ref_from_wy;
+static LagoonSceneMotion s_last;   /* the packet before this one (owner ties) */
+static int8_t s_last_owner[128];
+static int s_have_last;
 static State s_from, s_to;
 static LagoonSceneMotion s_pkt, s_pkt_from, s_pos, s_rendered, s_cur;
 static int s_have_to, s_have_from, s_have_pkt_from, s_checked, s_rendered_valid;
-static unsigned s_step_frame, s_period = 2, s_rendered_width, s_picture_in_field;
+static unsigned s_step_frame, s_rendered_width, s_picture_in_field;
+static double s_period = 2;   /* fields per game step: average of the last 8 */
+static uint8_t s_period_hist[8];
+static unsigned s_period_pos;
+static int s_step_real;   /* s_step_frame is a real step (not a scene start) */
 static int8_t s_owner[128];
 static int16_t s_obj_owner[LAGOON_SCENE_MOTION_OBJECTS];
 static uint32_t s_buf[kMaxWidth * kHeight];
@@ -134,9 +157,11 @@ void LagoonSmooth_AfterConfig(const char *config_path) {
 
 void LagoonSmooth_Reset(void) {
   s_have_to = s_have_from = s_have_pkt_from = s_checked = s_rendered_valid = 0;
+  s_have_last = 0;
   s_base_ok = 0;
   s_rendered2_valid = 0;
   s_period = 2;
+  memset(s_period_hist, 0, sizeof s_period_hist);
   memset(s_ring, 0, sizeof s_ring);
 }
 
@@ -177,6 +202,7 @@ void LagoonSmooth_AfterFrame(unsigned frame, const uint8_t *ram) {
   for (unsigned k = 0; k < kActors; ++k) {
     unsigned a = 0x500 + k * 0x40;
     r->live[k] = k == 0 || (ram[a] & 0xc0) == 0xc0;
+    r->type[k] = ram[a + 24];
     r->ax[k] = (int)word(ram, a + 2); r->ay[k] = (int)word(ram, a + 4);
   }
 }
@@ -217,34 +243,106 @@ static void state_at(double t, State *out) {
  * nearest candidate, or the owner of the neighbouring list slot. */
 enum { kOwnerNone = -1, kOwnerScreen = -2, kHudTop = 180 };
 
-static int owner_of(int x, int y, int have_motion, int odx, int ody, int *by_motion) {
+/* Where a character's 8x8 sprite pieces sit (top-left corner relative to its
+ * position), measured from the Nov 19 oam.log/motion.log over 270,000 pieces:
+ * Nasir (slot 0) x -27..13, y -35..0; type 5 (guards: 16x16 pieces) x -19..3,
+ * y -49..-11; type 1 x -13..-4, y -32..-2; others a wide box. The old single
+ * box (x -28..28, y -44..12) missed a guard's head and reached far below
+ * characters, so Nasir walking under a guard could take its head, or the
+ * guard Nasir's. Score = pixels outside the shape (x200), then distance to
+ * its middle; a piece more than kSlack px outside belongs to nobody. */
+enum { kSlack = 16 };
+/* Which field each sprite piece was built from (measured Nov 19, both sessions):
+ * Nasir's pieces come from the PREVIOUS field (his position and camera word,
+ * best fit in every room); every other piece in the sprite list -- doors,
+ * effects, the few characters drawn there -- follows THIS field's scroll.
+ * Round 6 used Nasir's rule for everything: town and cave pieces reversed
+ * direction 5-10x more often (shaking doors, NPCs, priest, enemies). */
+static int ref_ax(unsigned k) { return k == 0 ? s_spr.ax[k] : s_ref_rec.ax[k]; }
+static int ref_ay(unsigned k) { return k == 0 ? s_spr.ay[k] : s_ref_rec.ay[k]; }
+static int ref_ox(unsigned k) { return k == 0 ? s_spr_ox : s_ref_wx; }
+static int ref_oy(unsigned k) { return k == 0 ? s_spr_oy : s_ref_wy; }
+static int ref_live(unsigned k) { return s_rec_to.live[k] && (k == 0 ? s_spr.live[k] : s_ref_rec.live[k]); }
+static void extent(unsigned k, int *x0, int *x1, int *y0, int *y1) {
+  uint8_t t = s_spr.type[k];
+  if (k == 0) { *x0 = -27; *x1 = 13; *y0 = -35; *y1 = 0; }
+  else if (t == 5) { *x0 = -19; *x1 = 3; *y0 = -49; *y1 = -11; }
+  else if (t == 1) { *x0 = -13; *x1 = -4; *y0 = -32; *y1 = -2; }
+  else { *x0 = -28; *x1 = 12; *y0 = -49; *y1 = 4; }
+}
+static int outside(unsigned k, int dx, int dy) {
+  int x0, x1, y0, y1;
+  extent(k, &x0, &x1, &y0, &y1);
+  return (dx < x0 ? x0 - dx : dx > x1 ? dx - x1 : 0) + (dy < y0 ? y0 - dy : dy > y1 ? dy - y1 : 0);
+}
+
+/* prefer: the character this list slot belonged to in the previous packet
+ * (same picture). It wins ties: in the field before a step nobody has moved
+ * yet, so movement cannot tell a walking Nasir from the guard he passes.
+ * Movement that disagrees by a pixel (1000 points) still overrides it. */
+static int owner_of(int x, int y, int have_motion, int odx, int ody, int *by_motion, int prefer) {
   int best = kOwnerNone, best_score = 1 << 30;
   *by_motion = 0;
   for (unsigned k = 0; k < kActors; ++k) {
-    if (!s_rec_to.live[k]) continue;
-    int sx = s_rec_to.ax[k] - s_pkt.wx, sy0 = s_rec_to.ay[k] - s_pkt.wy;
-    int dx = x - sx, dy = y - sy0;
-    if (dx < -28 || dx > 28 || dy < -44 || dy > 12) continue;
-    int score = abs(dx + 4) + abs(dy + 12);
+    if (!ref_live(k)) continue;
+    int sx = ref_ax(k) - ref_ox(k), sy0 = ref_ay(k) - ref_oy(k);
+    int out = outside(k, x - sx, y - sy0);
+    if (out > kSlack) continue;
+    int x0, x1, y0, y1;
+    extent(k, &x0, &x1, &y0, &y1);
+    int score = 200 * out + abs(2 * (x - sx) - x0 - x1) / 2 + abs(2 * (y - sy0) - y0 - y1) / 2;
     if (have_motion) {
-      double pdx = (s_to.ax[k] - s_from.ax[k]) - (s_pkt.wx - s_pkt_from.wx);
-      double pdy = (s_to.ay[k] - s_from.ay[k]) - (s_pkt.wy - s_pkt_from.wy);
+      double pdx = k == 0 ? (s_spr.ax[k] - s_spr_from.ax[k]) - (s_spr_ox - s_spr_from_ox)
+                          : (s_to.ax[k] - s_from.ax[k]) - (s_ref_wx - s_ref_from_wx);
+      double pdy = k == 0 ? (s_spr.ay[k] - s_spr_from.ay[k]) - (s_spr_oy - s_spr_from_oy)
+                          : (s_to.ay[k] - s_from.ay[k]) - (s_ref_wy - s_ref_from_wy);
       score += 1000 * (int)lround(fabs(odx - pdx) + fabs(ody - pdy));
     }
+    if ((int)k == prefer) score -= 500;
     if (score < best_score) { best_score = score; best = (int)k; }
+  }
+  /* Scenery: a piece that kept its picture and stayed put in the world (a
+   * door's sprite parts, a sign) while the character whose shape holds it
+   * moved belongs to nobody. Without this choice, a door next to Nasir rode
+   * along with him. It only wins on movement evidence (a character that
+   * moved the same way scores lower: 300 points vs any character's 1000/px). */
+  if (have_motion && best >= 0) {
+    int still = 300 + 1000 * (int)lround(fabs(odx + (s_ref_wx - s_ref_from_wx)) + fabs(ody + (s_ref_wy - s_ref_from_wy)));
+    if (still < best_score) { *by_motion = 1; return kOwnerNone; }
   }
   if (have_motion && best >= 0 && best_score < 1000) *by_motion = 1;
   return best;
 }
 
+static int claimed(int x, int y) {
+  for (unsigned k = 0; k < kActors; ++k)
+    if (ref_live(k) && !outside(k, x - (ref_ax(k) - ref_ox(k)), y - (ref_ay(k) - ref_oy(k)))) return 1;
+  return 0;
+}
+
+/* Owner of a wide-view object: the test used before round 6 (this field's
+ * record and the packet's scroll; box x -28..28, y -44..12). */
+static int obj_owner_of(int x, int y) {
+  int best = kOwnerNone, best_score = 1 << 30;
+  for (unsigned k = 0; k < kActors; ++k) {
+    if (!s_rec_to.live[k]) continue;
+    int dx = x - (s_rec_to.ax[k] - s_pkt.wx), dy = y - (s_rec_to.ay[k] - s_pkt.wy);
+    if (dx < -28 || dx > 28 || dy < -44 || dy > 12) continue;
+    int score = abs(dx + 4) + abs(dy + 12);
+    if (score < best_score) { best_score = score; best = (int)k; }
+  }
+  return best;
+}
+
 static int in_box(int k, int x, int y) {
-  if (k < 0 || !s_rec_to.live[k]) return 0;
-  int dx = x - (s_rec_to.ax[k] - s_pkt.wx), dy = y - (s_rec_to.ay[k] - s_pkt.wy);
-  return dx >= -28 && dx <= 28 && dy >= -44 && dy <= 12;
+  if (k < 0 || !ref_live((unsigned)k)) return 0;
+  return outside((unsigned)k, x - (ref_ax(k) - ref_ox(k)), y - (ref_ay(k) - ref_oy(k))) <= 4;
 }
 
 static void assign_owners(void) {
   uint8_t sure[128] = {0};
+  int8_t prev[128];
+  memcpy(prev, s_last_owner, sizeof prev);
   int motion = s_have_from && s_have_pkt_from;
   for (unsigned i = 0; i < 128; ++i) {
     s_owner[i] = kOwnerNone;
@@ -252,13 +350,18 @@ static void assign_owners(void) {
     int x = s_pkt.ox[i], y = sy(s_pkt.oy[i]);
     int same = motion && s_pkt_from.visible[i] && s_pkt_from.tile[i] == s_pkt.tile[i];
     /* HUD sprites (the item icon): bottom band, same picture, same screen
-     * position: fixed on screen, never moved. */
-    if (same && y >= kHudTop && s_pkt_from.ox[i] == s_pkt.ox[i] && s_pkt_from.oy[i] == s_pkt.oy[i]) {
+     * position, and inside no character's shape: fixed on screen, never
+     * moved. (Without the shape test, the feet of Nasir or a guard standing
+     * at the bottom of the screen -- the water's edge -- were pinned while
+     * the rest of the body moved: a double image.) */
+    if (same && y >= kHudTop && s_pkt_from.ox[i] == s_pkt.ox[i] && s_pkt_from.oy[i] == s_pkt.oy[i] &&
+        !claimed(x, y)) {
       s_owner[i] = kOwnerScreen; sure[i] = 1; continue;
     }
     int by_motion;
+    int prefer = s_have_last && s_last.visible[i] && s_last.tile[i] == s_pkt.tile[i] ? prev[i] : kOwnerNone;
     s_owner[i] = (int8_t)owner_of(x, y, same, same ? x - s_pkt_from.ox[i] : 0,
-                                  same ? y - sy(s_pkt_from.oy[i]) : 0, &by_motion);
+                                  same ? y - sy(s_pkt_from.oy[i]) : 0, &by_motion, prefer);
     sure[i] = (uint8_t)by_motion;
   }
   /* A piece that changed its picture takes the owner of a neighbouring list
@@ -274,9 +377,9 @@ static void assign_owners(void) {
       if (k != kOwnerNone) { s_owner[i] = (int8_t)k; break; }
     }
   }
-  int unused;
   for (unsigned i = 0; i < s_pkt.count; ++i)
-    s_obj_owner[i] = (int16_t)owner_of(s_pkt.objx[i], s_pkt.objy[i], 0, 0, 0, &unused);
+    s_obj_owner[i] = (int16_t)obj_owner_of(s_pkt.objx[i], s_pkt.objy[i]);
+  s_last = s_pkt; memcpy(s_last_owner, s_owner, sizeof s_last_owner); s_have_last = 1;
 }
 
 static int floordiv(int a, int b) { int q = a / b; return (a % b != 0 && (a < 0) != (b < 0)) ? q - 1 : q; }
@@ -299,6 +402,8 @@ static int positions_at_scaled(double t, LagoonSceneMotion *out, int scale) {
   int bx = cx - s_pkt.wx, by = cy - s_pkt.wy;
   if (!small(bx / 2.0) || !small(by / 2.0)) return 0;
   int ubx = ucx - scale * s_pkt.wx, uby = ucy - scale * s_pkt.wy;   /* camera shift in units */
+  int usx = ucx - scale * s_spr_ox, usy = ucy - scale * s_spr_oy;   /* Nasir's sprite pieces */
+  int urx = ucx - scale * s_ref_wx, ury = ucy - scale * s_ref_wy;   /* the other sprite pieces */
   out->wx = cx; out->wy = cy;
   out->native_x = s_pkt.native_x + bx; out->native_y = s_pkt.native_y + by;
   if (s_have_pkt_from && s_pkt.parallax && s_pkt_from.parallax) {
@@ -313,25 +418,31 @@ static int positions_at_scaled(double t, LagoonSceneMotion *out, int scale) {
     if (!s_pkt.visible[i]) continue;
     int k = s_owner[i], mx, my;   /* motion in units */
     if (k == kOwnerScreen) continue;  /* HUD: exactly where the game put it */
+    int nasir = k == 0;
     if (k >= 0) {
-      mx = (int)lround(scale * now.ax[k]) - scale * s_rec_to.ax[k];
-      my = (int)lround(scale * now.ay[k]) - scale * s_rec_to.ay[k];
+      mx = (int)lround(scale * now.ax[k]) - scale * ref_ax(k);
+      my = (int)lround(scale * now.ay[k]) - scale * ref_ay(k);
     } else if (s_have_pkt_from && s_pkt_from.visible[i] && s_pkt_from.tile[i] == s_pkt.tile[i]) {
       /* No character nearby, same picture: its own motion in the world. */
-      double wx1 = s_pkt.ox[i] + s_pkt.wx, wx0 = s_pkt_from.ox[i] + s_pkt_from.wx;
-      double wy1 = sy(s_pkt.oy[i]) + s_pkt.wy, wy0 = sy(s_pkt_from.oy[i]) + s_pkt_from.wy;
+      double wx1 = s_pkt.ox[i] + s_ref_wx, wx0 = s_pkt_from.ox[i] + s_ref_from_wx;
+      double wy1 = sy(s_pkt.oy[i]) + s_ref_wy, wy0 = sy(s_pkt_from.oy[i]) + s_ref_from_wy;
       if (small(wx1 - wx0) && small(wy1 - wy0)) {
         mx = (int)lround(scale * lerp(wx0, wx1, t)) - scale * (int)wx1;
         my = (int)lround(scale * lerp(wy0, wy1, t)) - scale * (int)wy1;
       } else mx = my = 0;
     } else mx = my = 0;  /* fixed in the world */
-    int ux = scale * s_pkt.ox[i] + mx - ubx, uy = scale * sy(s_pkt.oy[i]) + my - uby;
+    int ux = scale * s_pkt.ox[i] + mx - (nasir ? usx : urx), uy = scale * sy(s_pkt.oy[i]) + my - (nasir ? usy : ury);
     int px = floordiv(ux, scale), py = floordiv(uy, scale);
     out->ox[i] = (int16_t)px;
     out->oy[i] = (uint8_t)(py & 255);
     out->half_o[i] = (uint8_t)((ux - scale * px) | ((uy - scale * py) << 1));
   }
   for (unsigned i = 0; i < s_pkt.count; ++i) {
+    /* The wide view's extra characters, doors and props (drawn by the port's
+     * own code, not the game's sprite list) are placed from THIS field's
+     * record and the packet's scroll, as before round 6. (Round 6b moved them
+     * to the sprite list's one-field-late reference: NPCs, cave enemies and
+     * doors shook.) */
     int k = s_obj_owner[i], mx = 0, my = 0;
     if (k >= 0) {
       mx = (int)lround(scale * now.ax[k]) - scale * s_rec_to.ax[k];
@@ -359,10 +470,17 @@ static double picture_phase(double alpha) {
   return n ? (double)k / (double)n : alpha;
 }
 
+/* A late step: in busy places the game itself sometimes needs 3 fields for a
+ * step instead of 2 (48 times in a 3.5-minute town walk). Freezing at t = 1
+ * for that field was a visible hitch (three pictures at one spot, then a
+ * rush). Keep moving at the same speed for at most one extra field instead;
+ * the next step starts from wherever the picture really is. */
+static double t_max(void) { return 1.0 + 1.0 / (double)s_period; }
+
 static double current_t(double alpha) {
   double tau = (double)(s_pkt.frame - s_step_frame) + picture_phase(alpha);
-  double t = tau / (double)s_period;
-  return t < 0 ? 0 : t > 1 ? 1 : t;
+  double t = tau / (double)s_period, hi = t_max();
+  return t < 0 ? 0 : t > hi ? hi : t;
 }
 
 /* Compare a redraw with the picture in dst: differing pixels + bounding box. */
@@ -423,6 +541,23 @@ static void log_line(unsigned frame, double alpha, double t, int drawn, const ch
   if (s_log) fprintf(s_log, "%u %.3f %.3f %d %s\n", frame, alpha, t, drawn, why);
 }
 
+/* The record and camera the game used for this packet's sprite list. */
+static int same_sprite_list(const LagoonSceneMotion *a, const LagoonSceneMotion *b) {
+  for (unsigned i = 0; i < 128; ++i) {
+    if (a->visible[i] != b->visible[i]) return 0;
+    if (a->visible[i] && (a->ox[i] != b->ox[i] || a->oy[i] != b->oy[i] || a->tile[i] != b->tile[i])) return 0;
+  }
+  return 1;
+}
+
+static void set_sprite_ref(const Record *rec, int new_scene) {
+  if (!new_scene && s_have_last && same_sprite_list(&s_cur, &s_last)) return;  /* not rebuilt */
+  const Record *p = record_for(s_cur.frame - 1);
+  if (p) { s_spr = *p; s_spr_ox = p->cx - kCamBaseX; s_spr_oy = p->cy - kCamBaseY; }
+  else { s_spr = *rec; s_spr_ox = s_cur.wx; s_spr_oy = s_cur.wy; }
+  s_ref_rec = *rec; s_ref_wx = s_cur.wx; s_ref_wy = s_cur.wy;
+}
+
 static void new_packet(const uint8_t *dst, size_t pitch, unsigned width) {
   const Record *rec = record_for(s_cur.frame);
   int same_scene = s_have_to && rec && s_cur.generation == s_pkt.generation &&
@@ -432,21 +567,35 @@ static void new_packet(const uint8_t *dst, size_t pitch, unsigned width) {
     return;
   }
   if (!same_scene) {
-    s_pkt = s_cur; s_rec_to = *rec; state_from_record(&s_to, rec);
-    s_have_to = 1; s_have_from = s_have_pkt_from = 0; s_step_frame = s_cur.frame;
+    s_pkt = s_cur; s_rec_to = *rec; state_from_record(&s_to, rec); set_sprite_ref(rec, 1);
+    s_have_last = 0;   /* new scene: no owners to keep */
+    s_have_to = 1; s_have_from = s_have_pkt_from = 0; s_step_frame = s_cur.frame; s_step_real = 0;
   } else if (rec->tick == s_rec_to.tick) {
     /* Same game step (the in-between field): new pose/graphics, same motion.
      * The camera word does not change here; the scroll may catch up. */
-    s_pkt = s_cur; s_rec_to = *rec;
+    s_pkt = s_cur; s_rec_to = *rec; set_sprite_ref(rec, 0);
   } else {
     unsigned elapsed = s_cur.frame - s_step_frame;
     double t_now = (double)elapsed / (double)s_period;
+    if (t_now > t_max()) t_now = t_max();
     State start;
-    if (s_have_from && t_now < 1) state_at(t_now, &start); else start = s_to;
+    if (s_have_from && t_now != 1) state_at(t_now, &start); else start = s_to;
     s_from = start;
     s_pkt_from = s_pkt; s_have_pkt_from = 1;
-    s_pkt = s_cur; s_rec_to = *rec; state_from_record(&s_to, rec);
-    s_period = elapsed >= 1 && elapsed <= 4 ? elapsed : 2;
+    s_spr_from = s_spr; s_spr_from_ox = s_spr_ox; s_spr_from_oy = s_spr_oy;
+    s_ref_from_wx = s_ref_wx; s_ref_from_wy = s_ref_wy;
+    s_pkt = s_cur; s_rec_to = *rec; state_from_record(&s_to, rec); set_sprite_ref(rec, 0);
+    /* Fields per step = the AVERAGE of the last 8 steps. Normally exactly 2.
+     * When the town slows the game down (steps of 2 and 3 fields mixed, up to
+     * 16 slow steps in 2 s), the average gives one steady, slower speed; the
+     * most common value flipped between 2 and 3 and the speed jumped. */
+    if (s_step_real && elapsed >= 1 && elapsed <= 4) s_period_hist[s_period_pos++ % 8] = (uint8_t)elapsed;
+    s_step_real = 1;
+    {
+      unsigned sum = 0, n = 0;
+      for (unsigned i = 0; i < 8; ++i) if (s_period_hist[i]) { sum += s_period_hist[i]; ++n; }
+      s_period = n ? (double)sum / (double)n : 2;
+    }
     s_step_frame = s_cur.frame;
     s_have_from = 1;
     ++s_steps;
@@ -468,10 +617,18 @@ static void new_packet(const uint8_t *dst, size_t pitch, unsigned width) {
       if (!s_half_ok) ++s_checks_failed;
     }
   }
+  /* Measurement for the wide view's own objects (NPCs, enemies, doors drawn by
+   * the port): their positions per field, compared offline with motion.log. */
+  if (s_log && s_pkt.count) {
+    fprintf(s_log, "%u objs wx=%d wy=%d n=%u", s_pkt.frame, s_pkt.wx, s_pkt.wy, s_pkt.count);
+    for (unsigned i = 0; i < s_pkt.count && i < 48; ++i)
+      fprintf(s_log, " %d,%d", (int)s_pkt.objx[i], (int)s_pkt.objy[i]);
+    fputc('\n', s_log);
+  }
   if (s_log && s_have_from)
     fprintf(s_log, "%u step-info room=%x tick=%x cam=%d,%d scroll-lag=%d,%d period=%u\n", s_pkt.frame,
             s_pkt.room, s_rec_to.tick, s_rec_to.cx, s_rec_to.cy, s_rec_to.cx - s_pkt.wx,
-            s_rec_to.cy - s_pkt.wy, s_period);
+            s_rec_to.cy - s_pkt.wy, (unsigned)lround(s_period));
 }
 
 static int same_draw(const LagoonSceneMotion *a, const LagoonSceneMotion *b) {

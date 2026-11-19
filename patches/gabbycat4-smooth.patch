@@ -45,7 +45,7 @@
    profile_start = ProfileStart();
    if (g_config.output_method != kOutputMethod_OpenGL && g_game->renderer_capture) {
      const char *path = DisplayScreenshotPath(g_present_frame);
-@@ -3812,6 +3826,235 @@
+@@ -3812,6 +3826,250 @@
  #endif
  }
  
@@ -88,6 +88,7 @@
 +  unsigned event_type[8];
 +  unsigned long long event_joins[8], event_joins_other;
 +  double event_waited;
++  unsigned long long deferrals;   /* loop passes that left events queued */
 +} g_emu;
 +
 +static int SDLCALL EmuWorkerMain(void *unused) {
@@ -123,6 +124,13 @@
 +  return true;
 +}
 +
++static void EmuJoined(void) {
++  g_emu.state = 2;
++  ++g_emu.jobs;
++  g_emu.total += g_emu.seconds;
++  if (g_emu.seconds > g_emu.max) g_emu.max = g_emu.seconds;
++}
++
 +static void EmuJoin(void) {
 +  if (g_emu.state != 1) return;
 +  if (!EMU_SEM_TRY(g_emu.done)) {
@@ -131,10 +139,15 @@
 +    g_emu.waited += MonotonicSeconds() - t;
 +    ++g_emu.waits;
 +  }
-+  g_emu.state = 2;
-+  ++g_emu.jobs;
-+  g_emu.total += g_emu.seconds;
-+  if (g_emu.seconds > g_emu.max) g_emu.max = g_emu.seconds;
++  EmuJoined();
++}
++
++/* Join only if the guest has already finished; never waits. */
++static bool EmuTryJoin(void) {
++  if (g_emu.state != 1) return true;
++  if (!EMU_SEM_TRY(g_emu.done)) return false;
++  EmuJoined();
++  return true;
 +}
 +
 +static bool EmuTake(void) {
@@ -159,6 +172,8 @@
 +            "joins_that_waited=%llu waited_ms=%.1f (of which for events %.1f)\n", g_emu.jobs,
 +            1000.0 * g_emu.total / (double)g_emu.jobs, 1000.0 * g_emu.max,
 +            g_emu.waits, 1000.0 * g_emu.waited, 1000.0 * g_emu.event_waited);
++    fprintf(stderr, "[second-core] event passes deferred until the guest was idle: %llu\n",
++            g_emu.deferrals);
 +    for (int i = 0; i < 8 && g_emu.event_joins[i]; ++i)
 +      fprintf(stderr, "[second-core] early joins for event type 0x%x: %llu\n",
 +              g_emu.event_type[i], g_emu.event_joins[i]);
@@ -281,21 +296,28 @@
  int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc, char **argv) {
    if (!game || !game->game_info || !game->display_name) {
      fprintf(stderr, "snesrecomp_desktop_main: descriptor needs display_name and game_info\n");
-@@ -4657,6 +4900,13 @@
+@@ -4657,8 +4915,19 @@
       * whole crash-capture pipeline (minidump + report + crash copy). */
      host_report_crash_test_tick();
  
 +    /* gabbycat4 second core: events may load states, reset or open menus;
-+     * handle them only while the guest is idle. */
-+    if (g_emu.state == 1 && EmuEventsNeedIdleGuest()) {
-+      double before = g_emu.waited;
-+      EmuJoin();
-+      g_emu.event_waited += g_emu.waited - before;
++     * handle them only while the guest is idle. Never WAIT for the guest
++     * here: a button reaches the game at the next field start either way, so
++     * waiting only made the picture late (a hitch per press). If the guest
++     * is still running, the events stay queued and are handled on a later
++     * pass, at the latest right after the field's own join below. */
++    bool events_deferred = false;
++    if (g_emu.state == 1 && EmuEventsNeedIdleGuest() && !EmuTryJoin()) {
++      events_deferred = true;
++      ++g_emu.deferrals;
 +    }
      ProfileStamp event_profile_start = ProfileStart();
-     while (SDL_PollEvent(&event)) {
+-    while (SDL_PollEvent(&event)) {
++    while (!events_deferred && SDL_PollEvent(&event)) {
        if (HandleDeviceEvent(&event))
-@@ -4869,24 +5119,52 @@
+         continue;
+       switch (event.type) {
+@@ -4869,24 +5138,55 @@
        snes_host_clock_reset(&video_clock, video_now, g_simulation_hz, presentation_hz);
        g_reset_clock = false;
      }
@@ -331,6 +353,9 @@
      }
  
 +    EmuJoin();   /* gabbycat4 second core: from here on the guest is idle */
++    /* Events left queued while the guest ran: handle them now (one more pass
++     * of the loop) so this field's input word includes them. */
++    if (events_deferred) continue;
 +
 +    /* gabbycat4 smooth motion: a picture that is due together with the next
 +     * field is shown BEFORE the field runs (alpha 1 = the end of the interval
@@ -352,7 +377,7 @@
      /* Input-source assignments apply to each keyboard map independently. */
      PollKeyboardControls(snesrecomp_sdl_get_keyboard_state());
  
-@@ -5058,6 +5336,8 @@
+@@ -5058,6 +5358,8 @@
       * than a branch. Never during turbo: speculating about frames that are
       * being skipped costs work for a picture nobody is reading. */
      bool runahead_captured = false;
@@ -361,7 +386,7 @@
      {
        const uint32 word = inputs | GetActiveControllers() | debug_server_get_controller_active_mask();
        if (InputTraceEnabled()) {
-@@ -5068,7 +5348,12 @@
+@@ -5068,7 +5370,12 @@
            fflush(stderr);
          }
        }
@@ -375,7 +400,7 @@
          RtlRunFrame(word);
        else
          runahead_captured = true;   /* it rasterised the speculated frame */
-@@ -5126,10 +5411,45 @@
+@@ -5126,10 +5433,45 @@
        bool keep_debt = game->keep_pacing_debt && game->keep_pacing_debt();
        snes_host_clock_simulation_done(&video_clock, MonotonicSeconds(), keep_debt,
                                        RtlLastFramePeriods());
@@ -422,7 +447,7 @@
          (!paced_custom || snes_host_clock_presentation_due(&video_clock, MonotonicSeconds()) ||
           (run_frames && frameCtr >= run_frames))) {
        double presented_at = MonotonicSeconds();
-@@ -5145,6 +5465,7 @@
+@@ -5145,6 +5487,7 @@
      }
    }
  

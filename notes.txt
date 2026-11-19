@@ -389,3 +389,120 @@ Round 4b (town, shared cache)
 - t1c PASS: identical output with and without the shared cache on 40 random scenes.
   tchain (synthetic): verified render + first picture 2.88 -> 2.76 ms. Real town gain should be
   larger (real maps repeat less work than random noise hides); needs a play log to confirm.
+
+Round 5 (Nov 19): button presses no longer wait for the game core
+- Nov 18 log (after round 4b): late pictures down to 49 of 10310 (~0.5%, was ~4%), but the
+  felt stutter = ~1 hitch/s of 8-24 ms. [second-core] guest mean 6.7 ms, max 17.9 ms;
+  57 joins waited 174 ms, 102.6 ms of it for events: early joins for 0x651/0x652
+  (SDL3 gamepad button down/up) 60 times. A press forced the main thread to wait for the
+  running guest (up to its whole frame) -> a missed picture per press. Worst at the start
+  (pressing through Continue) and during combat.
+- Waiting gained nothing: the input word goes into the next EmuStart either way.
+- Engine: EmuTryJoin (never waits). At the loop top, events that need an idle guest are left
+  queued if the guest is still running (counted: "event passes deferred"); the field's own
+  join then does one more loop pass ("continue") so they still reach this field's input word.
+  Same input latency, no wait. Patch regenerated: reverse-check OK, fresh apply identical.
+- Second pattern still in the log (town, specific spots): base field work raster 3.6 +
+  compose 4.5 ms in one slot (8.7 ms vs 5.5). Next if still felt: move their verified render
+  off that slot.
+
+Round 6 (Nov 19): double images (church; walking up to the guards from town)
+- Round 5 result: event waits 0.0 ms (was 102.6); 179 event passes deferred; user: "so close",
+  a few hitches, FPS steady. New report: Nasir and guards double when walking up to the guards
+  from town (not from the cave), Nasir double when moving in the church.
+- Measured (motion.log + oam.log, room 2): the sprite list of field f is built from the
+  PREVIOUS field's actor positions and camera word (66/67 moving fields fit p(f-1)-c(f-1);
+  p-s 1/67, p-c 31/67). Backgrounds use this field's scroll (which may trail the camera).
+- Old placement assumed sprites follow the packet's scroll and the current record: error =
+  (ax(f-1) - ax(f)) + (scroll - c(f-1)). Camera following: cancels in most fields. Camera
+  standing still (church, map edge near the guards): Nasir one step (3 px) off in every step
+  field = alternating positions = double image. Explains the direction dependence.
+- Fix (lagoon_smooth.c): sprite reference = record(f-1) and its camera word (origin =
+  camera - (0,-1), the camera/packet offset when the scroll is on time). Owners, box tests,
+  motion scores, free-piece world motion all use it. Background shift unchanged. Objects
+  (their wide renderer's objx/objy) unchanged.
+- Owner ties: in the field before a step nobody moved, so movement cannot tell Nasir from a
+  guard he passes; the slot's previous owner (same picture) now wins ties (-500 points; a
+  1 px motion disagreement = 1000 still overrides). Reset on a new scene.
+- tools/smooth-tests/t8.c PASS (3 cases); old code FAILS it the way the user saw
+  (Nasir 0,0,0,+4 half px). t7 retired (wrong sprite model). t2x/t2h/t2v/t1c PASS.
+- Next run records LAGOON_MOTION_LOG/LAGOON_OAM_LOG to confirm the rule in town, church, cave.
+- Round 6 play: double images by the water's edge, a few town hitches, 180 steady. Sprite rule
+  confirmed in every room: p(f-1)-c(f-1) town 3240/3246, church 462/463, guards 613/616.
+  Joins that waited 136 -> 17.
+
+Round 6b (Nov 19): replay of the real session (tools/smooth-tests/replay.c, make_replay.py)
+- Character shapes measured (270k pieces): Nasir x -27..13 y -35..0; type 5 (guards, 16x16)
+  x -19..3 y -49..-11 (head OUTSIDE the old box); type 1 (town NPCs, walk 1 px EVERY field)
+  x -13..-4 y -32..-2. Owner score = 200 x pixels outside the shape + distance to its middle,
+  + motion (1000/px) - previous owner (500). Objects (wide view) use the sprite reference.
+- HUD rule pinned the feet of Nasir/guards standing at the bottom of the screen (y >= 180,
+  water's edge) as status-bar sprites: now only pieces inside no character's shape.
+- Late steps (game slowdown, period 3, 48x in town): froze 3 pictures then rushed. Now t may
+  run to 1 + 1/period (one extra field at the same speed), the next step starts from the shown
+  position, and the period is the most common of the last 8 steps. Camera per picture around
+  a late step: was 1,1,0,0,0,..,2,..,2; now 1,1,1,1,0,1,0,1,1 (a short ease, no stop/jump).
+- Replay totals (jumps > 0.5 px / split pieces), old -> now: town 7411/3275 -> 303/1122,
+  church 751/194 -> 37/144, guards' area 1331/570 -> 92/422. Remaining splits are mostly a town
+  NPC walking right into Nasir (pieces overlap; even the reference cannot separate them).
+- t8, t2x/t2h/t2v/t1c PASS; compile clean with the real flags.
+
+Round 6c (Nov 19): 6b REGRESSION -- town NPCs, cave enemies, house doors and Nasir near them
+shook / doubled. Cause: 6b moved the wide view's own objects (objx/objy: characters, props,
+doors drawn by the port's code, not the game's sprite list) to the sprite list's one-field-late
+reference, an assumption the replay could not check (motion/oam logs do not contain them).
+Round 6 had also moved their OWNER test to that reference while placing them the old way.
+- Fix: objects back to exactly the pre-round-6 behaviour: owner = old box on this field's record
+  and the packet scroll (obj_owner_of), placement from s_rec_to and the scroll shift (ubx/uby).
+- smooth.log now writes "<frame> objs wx= wy= n= x,y ..." per packet so the objects' real
+  timing can be measured against motion.log instead of assumed.
+- Lesson: never move a drawing path to a new reference without a measurement OF THAT PATH.
+
+Round 6d (Nov 19): user after 6c: still the same -- doors, NPCs, Nasir, cave enemies, the priest.
+- Objects (wide view) measured from the new smooth.log "objs" lines: they follow THIS field's
+  scroll (4197/4798 camera moves) = the restored pre-6 placement. Not the cause.
+- New ownership-free measure in replay.c: every sprite piece's world position per picture,
+  count direction reversals (= shaking). Session 3: before round 6 town 9126 / cave 1736 /
+  church 10459; round 6 town 43211 / cave 16631 / church 2673. Round 6 itself caused it.
+- Two findings: (1) only Nasir's pieces come from the previous field; other pieces follow
+  this field's record and scroll. (2) The game REBUILDS its sprite list only on step fields:
+  unchanged on 3635/3683 in-between fields in town, 675/677 in the cave. Round 6 treated each
+  field's list as new, so every in-between field placed sprites one step off.
+- Fix: set_sprite_ref() keeps the reference of the field that built the list (same_sprite_list
+  vs the previous packet). Nasir: record/camera of the field before the rebuild. Others: the
+  rebuild field's record and scroll (s_ref_rec, s_ref_wx/wy, urx/ury).
+- Reversals now, session 3: town 7208, cave 1482, church 2525, guards 1145 (all below before-6);
+  session 2: town 15040 (26683), church 4057 (18136), guards 4292 (10218). Nasir's own pieces
+  12038 (before-6 24334); other characters 240 (321).
+- tools/smooth-tests/replay.c now includes the reversal counts. t8, t2x/t2h/t2v/t1c PASS.
+
+Round 6e (Nov 19): user after 6d: "way better". Left: a door's sprite parts move when Nasir
+walks past, the chicken looks strange/blurry, town "chugs" for a few seconds at 180 fps;
+cave and fighting fine.
+- Town chugging = the ORIGINAL game's slowdown (session 4: 159 slow 3-field steps in town, up
+  to 16 in 2 s; none in cave/church). The port keeps original timing on purpose. A "remove
+  original slowdown" option would be a separate, careful project (not done).
+- Scenery: owner_of could only answer "some character", so a door's sprite parts inside Nasir's
+  shape rode along with him. New choice "nobody" (300 points + 1000/px against standing still
+  in the world) wins only on movement evidence. Other-character reversals 1168 -> 500 (s4).
+- Period = AVERAGE of the last 8 steps (was the most common): in slowdown bursts the camera per
+  field went 3 3 3 1 2 3 ... -> 3 3 2 2 2 3 ... (no dips). The first step after a new scene is
+  not counted (t8 caught it).
+- Replay (reversals per room) unchanged or better on all three sessions; t8, t2x/t2h/t2v/t1c
+  PASS; compile clean.
+
+Round 6e result (Nov 19, session 5): user: slowdown handling "great... manageable"; only the two
+town guards and the house doors still look jumpy when Nasir walks past.
+- Measured: game sprite scenery drawn off its spot while Nasir walks: 77 of 23,574 (town),
+  0 elsewhere. A guard's 16x16 pieces track rock-solid in the replay (frames 1866-1879).
+  Wide-view objects that stay put are never given to Nasir (old box). Late pictures near the
+  guards 0.4% vs 0.9% elsewhere; slow steps near guards 1.5% vs 0.9%.
+- Not yet covered by any measurement: the backgrounds (door tiles: centre from VRAM, margins
+  from the room map -- a door whose VRAM tiles differ from the map would "pop" as it crosses),
+  and the wide view's own drawing. Next: A/B with LAGOON_HALF_PIXELS=0, then a background
+  source check near doors.
+- Slowdown removal: the framework models SNES CPU/APU cycles exactly (common_rtl.c,
+  RtlLastFramePeriods, IDLE_POLL.md: "a frame that only just fits decides a lag frame"). Removing
+  slowdown = giving the game's main loop more CPU time per field without touching the APU
+  clock/audio. Medium-to-large, needs care (AI/RNG timing, audio sync, savestates, the port's
+  own native timing paths).

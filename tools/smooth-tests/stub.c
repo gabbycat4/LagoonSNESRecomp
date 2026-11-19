@@ -22,3 +22,4 @@ int LagoonSceneRenderer_RenderMotion2x(uint32_t *out,unsigned width,const Lagoon
       row[260+2*i]=row[261+2*i]=p->oy[i];}
   }
   return 1;}
+void LagoonSceneRenderer_SetMotionCache(int on){(void)on;}
