@@ -594,3 +594,13 @@ on 10,694 of 10,695 fields (~175,600 clocks handed back per field = the CPU's 1/
 Slow steps: town 0 of 3,283 (was 156 of 7,903 = 2.0%, worst 14 in 2 s), all rooms 0 of 4,484.
 Picture self-checks 159 ok / 0 failed; no APU sync timeouts or errors in profile.txt.
 build-port/config.ini now has CpuSpeed = 150 (code default stays 100 = original timing).
+
+Chicken check (Nov 20, session 9 logs, no code change): the town chicken is actor slot 19, sprite
+palette 4, two 8x8 pieces, runs 2 px per step (everyone else 1; slot 18 also 2 px but never has
+sprite pieces near it). Our drawing of it is clean: pieces stay with slot 19, moves per picture
+are 0 or 1 half pixel, 12 reversals in 2,347 moves (its turns). Two things come from the GAME:
+(1) at a turn the game draws one more step in the old direction (-2 px) and then the new pose
+4 px back (+4 px), measured 4244-4246; at 30 Hz this hid among 2 px jumps, smoothed it shows.
+(2) 1 px per field = 2 half pixels per 3 pictures -> moves 1,1,0 per picture (uneven); at 240
+it would be 1,0,1,0 (even). The earlier chicken "stutter" was in the slowdown session (weapon shop).
+Possible fix if still visible: ease small pose-offset snaps (<= 4 px, same character) over a step.
