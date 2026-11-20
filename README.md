@@ -38,7 +38,31 @@ Pictures per second and half pixels apply when the game starts; the others
 apply at once. Developed and tested on Linux (CachyOS, Ryzen 7 2700, RX 6600,
 240 Hz FreeSync). Windows/macOS builds are untested; on Windows each picture is
 drawn by one core. Build it the same way as the original port
-([Build & mod](docs/BUILDING.md)). **Bring your own clean Lagoon USA ROM.**
+([Build & mod](docs/BUILDING.md)); `scripts/release/build_release.sh` makes the
+release packages. **Bring your own clean Lagoon USA ROM.**
+
+### Download this fork
+
+| System | Download |
+|---|---|
+| **Linux** (desktops from 2024 on: Ubuntu 24.04+, Fedora 40+, Arch/CachyOS…) | [Lagoon-EyeComfort-x86_64.AppImage](https://github.com/gabbycat4/LagoonSNESRecomp/releases/latest/download/Lagoon-EyeComfort-x86_64.AppImage) |
+| **Windows 10/11** (64-bit, lightly tested) | [Lagoon-EyeComfort-win-x64.zip](https://github.com/gabbycat4/LagoonSNESRecomp/releases/latest/download/Lagoon-EyeComfort-win-x64.zip) |
+
+[All releases, notes & checksums](https://github.com/gabbycat4/LagoonSNESRecomp/releases).
+The first start asks for your own ROM. The downloads start with the
+eye-comfort setup already on: 16:9 widescreen, borderless full screen, 120
+pictures per second, half pixels, steady camera, no slowdown and no screen
+shake. With a 180 or 240 Hz monitor, raise **Pictures per second** in
+**Options → Comfort** and restart. **Alt+Enter** switches between full screen
+and a window.
+
+- **Linux:** make the AppImage executable (right-click → Properties → *Allow
+  executing as program*, or `chmod +x`), then double-click it. Settings and
+  saves are kept in `~/.local/share/LagoonEyeComfort`. If it does not start,
+  install `fuse2` (`libfuse2` on Ubuntu).
+- **Windows:** extract the whole folder somewhere writable and run
+  `LagoonSNESRecomp.exe` (SmartScreen: *More info → Run anyway*). Settings and
+  saves stay in that folder.
 
 The download buttons below are the **original** port's releases, without this
 fork's changes. Credits: the original port and everything below is by

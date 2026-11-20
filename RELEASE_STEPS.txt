@@ -1,0 +1,49 @@
+# ============================================================
+# Publishing the AppImage + Windows zip on GitHub (Lagoon eye-comfort fork)
+# Every block starts with cd, so each one can be pasted whole into fish.
+# ============================================================
+
+# ---- 1. One time only: install the container tool, the GitHub tool, and fuse2 (to double-click AppImages)
+sudo pacman -S --needed podman github-cli fuse2
+
+# ---- 2. Build both packages (first run downloads Ubuntu 24.04 + compilers: ~10-20 min; later runs are faster)
+cd ~/Projects/LagoonSNESRecomp
+bash scripts/release/build_release.sh
+# Results land in dist/release/ :
+#   Lagoon-EyeComfort-x86_64.AppImage, Lagoon-EyeComfort-win-x64.zip, SHA256SUMS.txt
+# If one of them fails, copy the error to Claude. You can rebuild just one:
+#   bash scripts/release/build_release.sh linux
+#   bash scripts/release/build_release.sh windows
+
+# ---- 3. Test the AppImage like a new player would (a throw-away settings folder, so yours are untouched)
+cd ~/Projects/LagoonSNESRecomp
+env LAGOON_DATA_DIR=/tmp/lagoon-appimage-test ./dist/release/Lagoon-EyeComfort-x86_64.AppImage
+# Check: it asks for the ROM, the game starts, Options -> Comfort works, 240 + restart works.
+
+# ---- 3b. Optional quick Windows test with Wine (only proves it starts)
+cd /tmp
+rm -rf /tmp/lagoon-win-test; mkdir /tmp/lagoon-win-test; cd /tmp/lagoon-win-test
+bsdtar -xf ~/Projects/LagoonSNESRecomp/dist/release/Lagoon-EyeComfort-win-x64.zip
+wine Lagoon-EyeComfort/LagoonSNESRecomp.exe
+
+# ---- 4. Save the release scripts + new README download section in git and push
+cd ~/Projects/LagoonSNESRecomp
+git --no-optional-locks add scripts/release README.md RELEASE_STEPS.txt
+git --no-optional-locks commit -m "Release packages: Linux AppImage and Windows zip built in an Ubuntu 24.04 container" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0149vY7TtFeDQTsKEQXjYQjJ"
+git --no-optional-locks push origin smooth-motion
+git --no-optional-locks push origin smooth-motion:main
+git --no-optional-locks branch -f main smooth-motion
+
+# ---- 5. One time only: log the GitHub tool in (choose GitHub.com, HTTPS, "Login with a web browser")
+cd ~/Projects/LagoonSNESRecomp
+gh auth login
+
+# ---- 6. Create the release on YOUR fork and upload the three files (one command)
+cd ~/Projects/LagoonSNESRecomp
+gh release create v0.5.2-eyecomfort.1 dist/release/Lagoon-EyeComfort-x86_64.AppImage dist/release/Lagoon-EyeComfort-win-x64.zip dist/release/SHA256SUMS.txt --repo gabbycat4/LagoonSNESRecomp --target main --title "Lagoon eye-comfort 0.5.2-1" --notes-file scripts/release/RELEASE_NOTES.md --latest
+# Then open https://github.com/gabbycat4/LagoonSNESRecomp/releases to see it.
+# The README download links use "latest", so they always point to the newest release.
+
+# ---- Later releases: build again (step 2), test (3), push (4), then step 6 with a new tag,
+# e.g. v0.5.2-eyecomfort.2 (and a new --title).

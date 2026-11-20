@@ -1,0 +1,36 @@
+#!/bin/sh
+# AppImage entry point for gabbycat4's Lagoon eye-comfort fork.
+#
+# The engine keeps config.ini, keybinds.ini, rom.cfg, saves/ and the mod
+# choices "beside the executable", and inside an AppImage it reads that
+# location from $APPIMAGE. We point $APPIMAGE at a link in a per-user folder,
+# so settings and saves live in ~/.local/share/LagoonEyeComfort no matter
+# where the .AppImage file was downloaded to, and survive updates.
+# Restarting from the Comfort tab runs that link, i.e. this AppImage again.
+# LAGOON_DATA_DIR=/some/folder picks another folder (handy for testing).
+HERE="$(dirname "$(readlink -f "$0")")"
+DATA="${LAGOON_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/LagoonEyeComfort}"
+mkdir -p "$DATA/mods/preloaded" || { echo "Lagoon: cannot create $DATA" >&2; exit 1; }
+
+# Bundled mod packages are refreshed every start (an update may change them);
+# the player's own choices (state.toml) are kept.
+SRC="$HERE/usr/share/lagoon-eyecomfort/mods/preloaded"
+if [ -d "$SRC/packages" ]; then
+  rm -rf "$DATA/mods/preloaded/packages"
+  cp -r "$SRC/packages" "$DATA/mods/preloaded/packages"
+fi
+[ -e "$DATA/mods/preloaded/state.toml" ] || cp "$SRC/state.toml" "$DATA/mods/preloaded/state.toml" 2>/dev/null
+
+# First start only: the fork's eye-comfort settings (widescreen, full screen,
+# 120 pictures, steady camera, no slowdown, no shake). Later changes are kept.
+[ -e "$DATA/config.ini" ] || cp "$HERE/usr/share/lagoon-eyecomfort/default-config.ini" "$DATA/config.ini"
+
+# Assets are normally found next to the real binary; this link is a fallback
+# for anything that looks beside the data folder instead.
+ln -sfn "$HERE/usr/bin/assets" "$DATA/assets"
+
+if [ -n "$APPIMAGE" ]; then
+  ln -sfn "$APPIMAGE" "$DATA/LagoonSNESRecomp"
+  export APPIMAGE="$DATA/LagoonSNESRecomp"
+fi
+exec "$HERE/usr/bin/LagoonSNESRecomp" "$@"

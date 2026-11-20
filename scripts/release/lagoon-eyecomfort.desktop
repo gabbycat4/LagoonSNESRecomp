@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Lagoon (eye-comfort)
+Comment=Lagoon (SNES) recompiled for PC: smooth motion up to 240 Hz, no slowdown, screen shake off
+Exec=LagoonSNESRecomp
+Icon=lagoon-eyecomfort
+Categories=Game;
+Terminal=false

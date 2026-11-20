@@ -1,0 +1,27 @@
+Lagoon (SNES) for PC - gabbycat4's eye-comfort fork
+====================================================
+
+1. Extract the WHOLE folder somewhere you can write to (Desktop, Documents,
+   a Games folder). Not into Program Files. Settings and saves are kept in
+   this folder.
+
+2. Double-click LagoonSNESRecomp.exe.
+   Windows may say "Windows protected your PC" because the game is not
+   signed. Click "More info", then "Run anyway".
+
+3. The first start asks for your own clean Lagoon (USA) ROM
+   (unheadered, 1 MiB, CRC32 d2554270). No ROM is included.
+
+4. The game starts with the eye-comfort setup on: 16:9 widescreen,
+   borderless full screen, 120 pictures per second, half pixels, steady
+   camera, no slowdown and no screen shake.
+   With a 180 or 240 Hz monitor: Options -> Comfort -> "Pictures per
+   second", then close and restart the game.
+   Alt+Enter switches between full screen and a window.
+
+Notes
+- This Windows build was made on Linux and has had little testing on
+  Windows. On Windows each picture is drawn by one CPU core.
+- Problems or ideas: https://github.com/gabbycat4/LagoonSNESRecomp/issues
+- Original port by rages4calm and contributors; see CREDITS.md and the
+  licenses folder. Non-commercial license (PolyForm Noncommercial 1.0.0).

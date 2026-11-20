@@ -1,0 +1,18 @@
+# Build environment for the release packages (Linux AppImage + Windows zip).
+# Ubuntu 24.04 on purpose: a game built here runs on most Linux desktops from
+# 2024 on, while a build made on CachyOS needs the very newest system libraries.
+FROM docker.io/library/ubuntu:24.04
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential cmake ninja-build git python3 ca-certificates curl file zip xz-utils pkg-config \
+      libgl1-mesa-dev libegl1-mesa-dev libx11-dev libxext-dev libxrandr-dev libxcursor-dev \
+      libxi-dev libxinerama-dev libxss-dev libxtst-dev libxfixes-dev libxkbcommon-dev \
+      libwayland-dev wayland-protocols libdecor-0-dev libdrm-dev libgbm-dev \
+      libasound2-dev libpulse-dev libpipewire-0.3-dev libudev-dev libdbus-1-dev libfontconfig1 \
+      gcc-mingw-w64-x86-64-posix g++-mingw-w64-x86-64-posix binutils-mingw-w64-x86-64 mingw-w64-common \
+ && rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL -o /usr/local/bin/appimagetool \
+      https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage \
+ && chmod +x /usr/local/bin/appimagetool
+# appimagetool is itself an AppImage; containers have no FUSE, so let it unpack itself.
+ENV APPIMAGE_EXTRACT_AND_RUN=1
