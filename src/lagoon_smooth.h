@@ -23,6 +23,10 @@
 
 void LagoonSmooth_AfterConfig(const char *config_path);
 void LagoonSmooth_Reset(void);
+/* Live options from the Comfort menu (main thread). The CPU speed is handed
+ * to the engine at the next game-frame boundary on the game's own thread. */
+void LagoonSmooth_SetSmoothCamera(int on);
+void LagoonSmooth_SetCpuSpeed(unsigned percent);
 unsigned LagoonSmooth_PicturesPerSecond(void);
 /* after_run_frame: record the game tick, camera and actor table ($0408,
  * $0480/$0482, $0500..) for the field that just ran. */

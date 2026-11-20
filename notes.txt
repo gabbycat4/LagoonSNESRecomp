@@ -604,3 +604,20 @@ are 0 or 1 half pixel, 12 reversals in 2,347 moves (its turns). Two things come 
 (2) 1 px per field = 2 half pixels per 3 pictures -> moves 1,1,0 per picture (uneven); at 240
 it would be 1,0,1,0 (even). The earlier chicken "stutter" was in the slowdown session (weapon shop).
 Possible fix if still visible: ease small pose-offset snaps (<= 4 px, same character) over a step.
+
+Round 9 (Nov 20): Comfort tab in the in-game Options menu (user: chicken looks great, slowdown gone).
+- Options menu (src/lagoon_settings.c) now has six tabs: Sound, Journal, Items, Display, Comfort,
+  Travel (tabs right-aligned and measured, so they fit). Comfort rows:
+  Steady camera On/Off (SmoothCamera, live), Remove slowdown On/Off (CpuSpeed 150/100, live),
+  Pictures per second 60/120/180 (PicturesPerSecond, next start), Half pixels On/Off
+  (HalfPixels, next start). Each deliberate change saves only its own [Lagoon] key through the
+  existing atomic, concurrent-edit-checked writer (BOM, CRLF, comments, unknown keys kept).
+- Live options follow the zoom pattern: LagoonSettings_TakeComfortChange() is taken once in
+  main.c and applied with LagoonSmooth_SetSmoothCamera / LagoonSmooth_SetCpuSpeed. The CPU speed
+  reaches the engine in LagoonSmooth_AfterFrame (game thread, between frames; the next field
+  starts with a fresh mark), never from the menu thread.
+- 240 is not offered yet (needs the 60.0 fields/s work first). Screen shake not yet.
+- tests/lagoon_settings_test.c: tab order updated (Display -> Comfort -> Travel) and a Comfort
+  test block; whole settings suite PASS (gcc needs -Wno-misleading-indentation for the
+  original code's one-line style under -Werror). Renders comfort.ppm: build-port/comfort-preview.png.
+- main.c, lagoon_smooth.c, lagoon_settings.c compile with the real flags; t8 PASS.

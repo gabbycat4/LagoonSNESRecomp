@@ -66,6 +66,7 @@ static int s_second_core = 1;           /* [Lagoon] SecondCore, LAGOON_SECOND_CO
 static int s_half_pixels = 1;           /* [Lagoon] HalfPixels, LAGOON_HALF_PIXELS */
 static int s_smooth_camera = 1;         /* [Lagoon] SmoothCamera, LAGOON_SMOOTH_CAMERA */
 static unsigned s_cpu_speed = 100;      /* [Lagoon] CpuSpeed, LAGOON_CPU_SPEED (100 = original) */
+static volatile unsigned s_cpu_speed_wanted = 100;   /* Comfort menu, applied on the game thread */
 enum { kCamAvg = 16 };
 static double s_camq[kCamAvg][2];
 static unsigned s_camq_n, s_camq_pos, s_camq_frame, s_camq_pic;
@@ -175,6 +176,7 @@ void LagoonSmooth_AfterConfig(const char *config_path) {
   const char *speed = getenv("LAGOON_CPU_SPEED");
   if (speed && *speed) s_cpu_speed = valid_speed(strtol(speed, NULL, 10));
   snes_beam_frame_driver_set_cpu_speed(s_cpu_speed);
+  s_cpu_speed_wanted = s_cpu_speed;
   const char *half = getenv("LAGOON_HALF_PIXELS");
   if (half && *half) s_half_pixels = strtol(half, NULL, 10) != 0;
   if (!once) {
@@ -234,7 +236,15 @@ static unsigned word(const uint8_t *ram, unsigned a) {
   return (unsigned)ram[a] | ((unsigned)ram[a + 1] << 8);
 }
 
+void LagoonSmooth_SetSmoothCamera(int on) { s_smooth_camera = on != 0; s_camq_n = 0; }
+void LagoonSmooth_SetCpuSpeed(unsigned percent) { s_cpu_speed_wanted = valid_speed(percent); }
+
 void LagoonSmooth_AfterFrame(unsigned frame, const uint8_t *ram) {
+  /* Between game frames on the game's thread: the next field starts with a fresh mark. */
+  if (s_cpu_speed_wanted != s_cpu_speed) {
+    s_cpu_speed = s_cpu_speed_wanted;
+    snes_beam_frame_driver_set_cpu_speed(s_cpu_speed);
+  }
   if (s_pps <= 60 || !ram) return;
   Record *r = &s_ring[frame % kRing];
   r->frame = frame; r->valid = 1;

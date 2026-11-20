@@ -19,7 +19,7 @@
 extern int snesrecomp_desktop_get_volume(void);
 extern void snesrecomp_desktop_set_volume(int volume);
 enum {WIDTH=640,HEIGHT=360};
-enum {TAB_SOUND,TAB_JOURNAL,TAB_ITEMS,TAB_DISPLAY,TAB_TRAVEL,TAB_COUNT,CONTEXT_BYTES=8192};
+enum {TAB_SOUND,TAB_JOURNAL,TAB_ITEMS,TAB_DISPLAY,TAB_COMFORT,TAB_TRAVEL,TAB_COUNT,CONTEXT_BYTES=8192};
 static uint32_t panel[WIDTH*HEIGHT],prior_input,repeat_at;
 static unsigned opened,selected,primed,repeat_armed,achievements_requested;
 static unsigned active_tab;
@@ -34,6 +34,13 @@ static unsigned travel_available,travel_confirming,return_requested;
 static unsigned quit_confirming,quit_selected,quit_requested;
 static unsigned display_selected,view_zoom=100,zoom_requested;
 static int zoom_save_failed;
+/* gabbycat4 Comfort tab: eye-comfort options ([Lagoon] keys of lagoon_smooth.c).
+ * Steady camera and slowdown removal apply live (the host takes the change);
+ * pictures per second and half pixels apply the next time the game starts. */
+enum {COMFORT_CAMERA,COMFORT_SLOWDOWN,COMFORT_PICTURES,COMFORT_HALF,COMFORT_ROWS};
+static unsigned comfort_selected,comfort_camera=1,comfort_cpu=100,comfort_pictures=60,comfort_half=1;
+static unsigned comfort_changed;
+static int comfort_save_failed;
 #ifdef _WIN32
 static wchar_t *wide(const char *text){
  int count=MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,text,-1,NULL,0);if(!count)return NULL;
@@ -195,7 +202,36 @@ void LagoonSettings_Configure(const char *path){
  if(text&&!locate(text,bytes,"SoundtrackVolume",100,100,&a,&b,&c,&value,&section,&nl))value=100;
  LagoonSoundtrack_SetVolume(value);value=0;
  if(text&&!locate(text,bytes,"ShowSwordRange",0,1,&a,&b,&c,&value,&section,&nl))value=0;
- sword_range_enabled=value;free(text);
+ sword_range_enabled=value;
+ comfort_selected=comfort_changed=0;comfort_save_failed=0;
+ value=1;if(text&&!locate(text,bytes,"SmoothCamera",1,1,&a,&b,&c,&value,&section,&nl))value=1;comfort_camera=value;
+ value=100;if(text&&!locate(text,bytes,"CpuSpeed",100,400,&a,&b,&c,&value,&section,&nl))value=100;comfort_cpu=value<100?100:value;
+ value=60;if(text&&!locate(text,bytes,"PicturesPerSecond",60,240,&a,&b,&c,&value,&section,&nl))value=60;
+ comfort_pictures=value==120||value==180||value==240?value:60;
+ value=1;if(text&&!locate(text,bytes,"HalfPixels",1,1,&a,&b,&c,&value,&section,&nl))value=1;comfort_half=value;
+ free(text);
+}
+int LagoonSettings_TakeComfortChange(unsigned *steady_camera,unsigned *cpu_speed){
+ if(!comfort_changed)return 0;comfort_changed=0;
+ if(steady_camera)*steady_camera=comfort_camera;if(cpu_speed)*cpu_speed=comfort_cpu;return 1;
+}
+static void comfort_change(unsigned command){
+ int back=command==LAGOON_SETTINGS_LEFT;
+ if(comfort_selected==COMFORT_CAMERA){
+  comfort_camera=!comfort_camera;comfort_changed=1;
+  comfort_save_failed=!persist_setting("SmoothCamera",comfort_camera,1,1);
+ }else if(comfort_selected==COMFORT_SLOWDOWN){
+  comfort_cpu=comfort_cpu>100?100:150;comfort_changed=1;
+  comfort_save_failed=!persist_setting("CpuSpeed",comfort_cpu,100,400);
+ }else if(comfort_selected==COMFORT_PICTURES){
+  static const unsigned choices[]={60,120,180};unsigned i=0;
+  while(i<3&&choices[i]!=comfort_pictures)i++;if(i==3)i=back?0:2;
+  comfort_pictures=choices[(i+(back?2:1))%3];
+  comfort_save_failed=!persist_setting("PicturesPerSecond",comfort_pictures,60,240);
+ }else{
+  comfort_half=!comfort_half;
+  comfort_save_failed=!persist_setting("HalfPixels",comfort_half,1,1);
+ }
 }
 void LagoonSettings_Observe(const uint8_t *ram,size_t size){
  if(!ram||size<LAGOON_JOURNAL_RAM_BYTES||size<LAGOON_ITEM_GUIDE_RAM_BYTES){context_size=0;memset(context,0,sizeof context);return;}
@@ -247,6 +283,12 @@ void LagoonSettings_Command(unsigned command){
   return;
  }
  if(active_tab==TAB_JOURNAL)return;
+ if(active_tab==TAB_COMFORT){
+  if(command==LAGOON_SETTINGS_UP){comfort_selected=comfort_selected?comfort_selected-1:COMFORT_ROWS-1;return;}
+  if(command==LAGOON_SETTINGS_DOWN){comfort_selected=(comfort_selected+1)%COMFORT_ROWS;return;}
+  if(command==LAGOON_SETTINGS_ACTIVATE||command==LAGOON_SETTINGS_LEFT||command==LAGOON_SETTINGS_RIGHT)comfort_change(command);
+  return;
+ }
  if(active_tab==TAB_DISPLAY){
   if(command==LAGOON_SETTINGS_UP||command==LAGOON_SETTINGS_DOWN){display_selected=!display_selected;return;}
   if(command==LAGOON_SETTINGS_ACTIVATE||command==LAGOON_SETTINGS_LEFT||command==LAGOON_SETTINGS_RIGHT){
@@ -285,7 +327,7 @@ void LagoonSettings_Tick(uint32_t human,uint32_t ticks){
  if(edge&SNES_PAD_L)LagoonSettings_Command(LAGOON_SETTINGS_PREVIOUS_TAB);
  else if(edge&SNES_PAD_R)LagoonSettings_Command(LAGOON_SETTINGS_NEXT_TAB);
  unsigned display_activated=0,quit_activated=0;
- if(edge&(SNES_PAD_A|SNES_PAD_Y)){display_activated=active_tab==TAB_DISPLAY;quit_activated=quit_confirming||(active_tab==TAB_SOUND&&selected==3);LagoonSettings_Command(LAGOON_SETTINGS_ACTIVATE);if(!opened)return;}
+ if(edge&(SNES_PAD_A|SNES_PAD_Y)){display_activated=active_tab==TAB_DISPLAY||active_tab==TAB_COMFORT;quit_activated=quit_confirming||(active_tab==TAB_SOUND&&selected==3);LagoonSettings_Command(LAGOON_SETTINGS_ACTIVATE);if(!opened)return;}
  if(edge&nav){repeat_at=ticks+SNES_OVL_REPEAT_DELAY;repeat_armed=1;}
  else if(nav&&repeat_armed&&(int32_t)(ticks-repeat_at)>=0){edge|=nav;repeat_at=ticks+SNES_OVL_REPEAT_RATE;}
  if(!nav)repeat_armed=0;
@@ -309,10 +351,32 @@ static void wrapped(int x,int y,const char *source,uint32_t colour,int width,uns
  }
 }
 static void tabs(void){
- static const char *names[]={"Sound","Journal","Items","Display","Travel"};static const int x[]={200,280,360,440,520};
+ static const char *names[]={"Sound","Journal","Items","Display","Comfort","Travel"};
+ /* Right-aligned to the frame with even gaps (six tabs since the Comfort tab). */
+ int total=0,gap=16;for(unsigned i=0;i<TAB_COUNT;i++)total+=LagoonUI_TextWidth(names[i],1)+(i?gap:0);
+ int x=612-total;
  for(unsigned i=0;i<TAB_COUNT;i++){
-  LagoonUI_Text(panel,WIDTH,HEIGHT,x[i],30,names[i],i==active_tab?LAGOON_UI_GOLD:LAGOON_UI_DIM,1);
-  if(i==active_tab)rect(x[i],53,LagoonUI_TextWidth(names[i],1),2,LAGOON_UI_GOLD);
+  LagoonUI_Text(panel,WIDTH,HEIGHT,x,30,names[i],i==active_tab?LAGOON_UI_GOLD:LAGOON_UI_DIM,1);
+  if(i==active_tab)rect(x,53,LagoonUI_TextWidth(names[i],1),2,LAGOON_UI_GOLD);
+  x+=LagoonUI_TextWidth(names[i],1)+gap;
+ }
+}
+static void comfort_image(void){
+ static const char *names[]={"Steady camera","Remove slowdown","Pictures per second","Half pixels"};
+ static const char *help[]={"Evens out the camera's stop-and-go on diagonal walks.",
+  "More processor time: busy places never chug. Music unchanged.",
+  "More pictures = smoother, less blur. Applies at next start.",
+  "Motion in half-pixel steps (120 or more). Applies at next start."};
+ for(unsigned row=0;row<COMFORT_ROWS;row++){
+  int y=92+(int)row*48;char value[16];
+  if(row==comfort_selected){rect(20,y-5,600,45,LAGOON_UI_SELECT);LagoonUI_Cursor(panel,WIDTH,HEIGHT,29,y+5,LAGOON_UI_GOLD);}
+  text(50,y,names[row],LAGOON_UI_FG);
+  if(row==COMFORT_CAMERA)snprintf(value,sizeof value,"%s",comfort_camera?"On":"Off");
+  else if(row==COMFORT_SLOWDOWN){if(comfort_cpu==100)snprintf(value,sizeof value,"Off");else if(comfort_cpu==150)snprintf(value,sizeof value,"On");else snprintf(value,sizeof value,"%u%%",comfort_cpu);}
+  else if(row==COMFORT_PICTURES)snprintf(value,sizeof value,"%u",comfort_pictures);
+  else snprintf(value,sizeof value,"%s",comfort_half?"On":"Off");
+  text(602-LagoonUI_TextWidth(value,1),y,value,LAGOON_UI_GOLD);
+  LagoonUI_TextSmall(panel,WIDTH,HEIGHT,50,y+24,help[row],LAGOON_UI_DIM);
  }
 }
 static void journal_image(void){
@@ -394,9 +458,9 @@ int LagoonSettings_Image(const uint32_t **pixels,int *width,int *height){
  for(unsigned n=0;n<WIDTH*HEIGHT;n++)panel[n]=bg;
  LagoonUI_Frame(panel,WIDTH,HEIGHT,0,0,WIDTH,HEIGHT);
  LagoonUI_Text(panel,WIDTH,HEIGHT,28,14,"Options",fg,2);
- tabs();LagoonUI_TextSmall(panel,WIDTH,HEIGHT,28,60,active_tab==TAB_SOUND?"Changes apply immediately. The game is paused.":active_tab==TAB_JOURNAL?"Your current journey":active_tab==TAB_ITEMS?"Item reference and shop prices":active_tab==TAB_DISPLAY?"Live display options and optional visual guides":"Return to a known dungeon entrance",dim);
+ tabs();LagoonUI_TextSmall(panel,WIDTH,HEIGHT,28,60,active_tab==TAB_SOUND?"Changes apply immediately. The game is paused.":active_tab==TAB_JOURNAL?"Your current journey":active_tab==TAB_ITEMS?"Item reference and shop prices":active_tab==TAB_DISPLAY?"Live display options and optional visual guides":active_tab==TAB_COMFORT?"Easier on the eyes: smoother motion, no slowdown":"Return to a known dungeon entrance",dim);
  rect(28,76,584,1,LAGOON_UI_LINE);
- if(quit_confirming)quit_image();else if(active_tab==TAB_JOURNAL)journal_image();else if(active_tab==TAB_ITEMS)items_image();else if(active_tab==TAB_DISPLAY)display_image();else if(active_tab==TAB_TRAVEL)travel_image();else for(unsigned row=0;row<4;row++){
+ if(quit_confirming)quit_image();else if(active_tab==TAB_JOURNAL)journal_image();else if(active_tab==TAB_ITEMS)items_image();else if(active_tab==TAB_DISPLAY)display_image();else if(active_tab==TAB_COMFORT)comfort_image();else if(active_tab==TAB_TRAVEL)travel_image();else for(unsigned row=0;row<4;row++){
   int y=92+(int)row*48;char label[48];
   if(row==selected){rect(20,y-5,600,45,LAGOON_UI_SELECT);LagoonUI_Cursor(panel,WIDTH,HEIGHT,29,y+5,accent);}
   text(50,y,row==3?"Quit to desktop":row==2?"Achievements":row?"X68000 music":"Master volume",fg);
@@ -405,11 +469,12 @@ int LagoonSettings_Image(const uint32_t **pixels,int *width,int *height){
   else{text(565,y,row==3?"Quit":"Open",accent);LagoonUI_TextSmall(panel,WIDTH,HEIGHT,50,y+24,row==3?"Close the game after a confirmation.":"Browse your journey and earned achievements.",dim);}
  }
  rect(28,292,584,1,LAGOON_UI_LINE);
- LagoonUI_TextSmall(panel,WIDTH,HEIGHT,28,305,quit_confirming?"Left/Right: choose    A / Enter: select":active_tab==TAB_SOUND?"Up/Down: select    Left/Right: adjust":active_tab==TAB_ITEMS?"Up/Down: browse items":active_tab==TAB_DISPLAY?"Up/Down: select    Left/Right or A / Enter: change":active_tab==TAB_TRAVEL?travel_confirming?"A / Enter: confirm return":travel_available?"A / Enter: choose return":"Return is not available at this moment.":"Progress follows your current adventure.",fg);
+ LagoonUI_TextSmall(panel,WIDTH,HEIGHT,28,305,quit_confirming?"Left/Right: choose    A / Enter: select":active_tab==TAB_SOUND?"Up/Down: select    Left/Right: adjust":active_tab==TAB_ITEMS?"Up/Down: browse items":active_tab==TAB_DISPLAY||active_tab==TAB_COMFORT?"Up/Down: select    Left/Right or A / Enter: change":active_tab==TAB_TRAVEL?travel_confirming?"A / Enter: confirm return":travel_available?"A / Enter: choose return":"Return is not available at this moment.":"Progress follows your current adventure.",fg);
  LagoonUI_TextSmall(panel,WIDTH,HEIGHT,28,322,quit_confirming?"B / Esc: cancel":travel_confirming?"L / R or PageUp / PageDown: tabs    B / Esc: cancel":"L / R or PageUp / PageDown: tabs    B / Esc: close",dim);
  if(active_tab==TAB_SOUND&&selected>=2&&!quit_confirming)LagoonUI_TextSmall(panel,WIDTH,HEIGHT,28,341,selected==3?"A / Enter: choose quit":"A / Enter: open achievements",accent);
  if(active_tab==TAB_SOUND&&save_failed&&!quit_confirming)LagoonUI_SmallFit(panel,WIDTH,HEIGHT,28,341,"Music volume couldn't be saved. Try again from the launcher.",accent,582);
  if(active_tab==TAB_DISPLAY&&range_save_failed)LagoonUI_SmallFit(panel,WIDTH,HEIGHT,28,341,"Setting couldn't be saved. The range cue applies for this session.",accent,582);
+ if(active_tab==TAB_COMFORT&&comfort_save_failed)LagoonUI_SmallFit(panel,WIDTH,HEIGHT,28,341,"Setting couldn't be saved. It applies for this session only.",LAGOON_UI_GOLD,582);
  if(active_tab==TAB_DISPLAY&&zoom_save_failed)LagoonUI_SmallFit(panel,WIDTH,HEIGHT,28,341,"Zoom applies now but couldn't be saved. Try again in Companion.",accent,582);
  if(pixels)*pixels=panel;if(width)*width=WIDTH;if(height)*height=HEIGHT;return 1;
 }

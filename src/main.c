@@ -253,6 +253,7 @@ static void LagoonHost_SettingsRequest(void) {
     if(!snesrecomp_host_frame_is_live())return;
     if(LagoonSettings_TakeQuitRequest()){snesrecomp_request_exit();return;}
     unsigned zoom;if(LagoonSettings_TakeZoomRequest(&zoom))LagoonHost_ApplyZoom(zoom);
+    {unsigned camera,speed;if(LagoonSettings_TakeComfortChange(&camera,&speed)){LagoonSmooth_SetSmoothCamera((int)camera);LagoonSmooth_SetCpuSpeed(speed);}} /* gabbycat4 Comfort tab */
     if(LagoonSettings_TakeAchievementsRequest())LagoonHost_OpenAchievements();
     if(LagoonSettings_TakeReturnRequest()){
         LagoonReturnStatus status;
