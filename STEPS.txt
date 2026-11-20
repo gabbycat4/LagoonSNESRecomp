@@ -1,21 +1,29 @@
-# Lagoon Step 5, round 7c: guards keep their own pieces when Nasir walks past
+# Lagoon round 8b: faster CPU, second design (the first one never got a chance to work)
 # Every line is a fish comment or a command, so a whole block can be pasted.
 # Logs land in build-port/. Tell Claude "done" after each run.
+# The engine changed, so the build re-checks the engine patch (Claude already verified it).
 
 # --- 1. Rebuild (ALWAYS first after Claude changes code) ---
 cd ~/Projects/LagoonSNESRecomp
 cmake --build build-port --target LagoonSNESRecomp 2>&1 | tail -5
 # If the last lines say "error", send them to Claude instead of running.
 
-# --- 2. Play with MangoHud (paste this whole block) ---
-# Walk past and IN FRONT OF the two guards by the stairs (overlap them), then past the
-# house doors in town like in your videos. Quit the game normally when done.
+# --- 2. Play with the faster CPU (150%) and MangoHud (paste this whole block) ---
+# Walk the spots that chug: from the well to the next house, past the weapon shop, near the
+# chicken. 2-3 minutes in town.
+# Then a quick check elsewhere: a fight, the music, a door/scene change, the menu.
+# Listen for: music speed or sound effects out of sync. Watch for: anything odd in enemies.
 cd ~/Projects/LagoonSNESRecomp
-env LAGOON_SMOOTH_LOG=smooth.log LAGOON_MOTION_LOG=motion.log LAGOON_OAM_LOG=oam.log SNESRECOMP_FRAME_TIMING=timing.csv SNESRECOMP_HOST_PROFILE=1 mangohud ./build-port/LagoonSNESRecomp --no-launcher --rom lagoon.sfc 2> profile.txt
+env LAGOON_CPU_SPEED=150 LAGOON_SMOOTH_LOG=smooth.log LAGOON_MOTION_LOG=motion.log LAGOON_OAM_LOG=oam.log SNESRECOMP_FRAME_TIMING=timing.csv SNESRECOMP_HOST_PROFILE=1 mangohud ./build-port/LagoonSNESRecomp --no-launcher --rom lagoon.sfc 2> profile.txt
 
-# --- 3. Tell Claude "done": guards better/same/worse? doors? (videos welcome again) ---
+# --- 3. Tell Claude "done": town chugging gone? music/sound OK? anything strange? ---
+# (Without LAGOON_CPU_SPEED=150 the game runs exactly as before: original timing.)
 
-# --- 4. Commit when it feels at least as good as before ---
+# --- 4. Commit (round 8b worked: 0 slow steps in town at 150%) ---
 cd ~/Projects/LagoonSNESRecomp
-git --no-optional-locks add src/lagoon_smooth.c notes.txt STEPS.txt
-git --no-optional-locks commit -m "Sprite owners by palette (guards keep their pieces when Nasir overlaps); log which smooth settings are on"
+git --no-optional-locks add src/lagoon_smooth.c patches/lagoon-framework.patch patches/gabbycat4-smooth.patch tools/smooth-tests/replay.c tools/smooth-tests/stub.c tools/smooth-tests/slow_steps.py notes.txt STEPS.txt
+git --no-optional-locks commit -m "Faster CPU option (CpuSpeed / LAGOON_CPU_SPEED) removes the original slowdown; music timing unchanged; slow-step counter"
+
+# --- 5. From now on, plain play uses 150% (build-port/config.ini: CpuSpeed = 150) ---
+cd ~/Projects/LagoonSNESRecomp
+mangohud ./build-port/LagoonSNESRecomp --no-launcher --rom lagoon.sfc

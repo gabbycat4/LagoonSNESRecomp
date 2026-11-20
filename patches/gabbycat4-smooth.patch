@@ -477,3 +477,244 @@
    /* Window size at scale 1 for a frame of this width (default: 4:3 on 224). */
    int (*window_base_width)(int frame_w);
    int (*window_base_height)(void);
+--- a/runner/src/beam_frame_driver.c
++++ b/runner/src/beam_frame_driver.c
+@@ -93,7 +93,10 @@
+ 
+ /* Parked time: the beam, APU and coprocessors advance; the CPU does not. */
+ static void advance_parked(uint64_t until) {
++  rtl_cpu_speed_settle();          /* gabbycat4: scale the CPU's time first, */
++  if (until < g_cpu.master_cycles) until = g_cpu.master_cycles;
+   g_cpu.master_cycles = until;
++  rtl_cpu_speed_mark();            /* parked time itself is real time */
+   snes_refresh_exempt();
+   snes_sync_master_clock(g_snes, g_cpu.master_cycles);
+   cart_sync_coprocessors(g_snes->cart, g_cpu.master_cycles);
+@@ -108,6 +111,7 @@
+   cpu_push_interrupt_frame_at(&g_cpu, s_resume_pc);
+   interp_bridge_set_master_deadline(deadline);
+   (void)interp_bridge_run_interrupt(&g_cpu, vector);
++  rtl_cpu_speed_settle();   /* gabbycat4 faster CPU */
+   /* A deadline left armed stays true for every AOT block prologue afterwards
+    * and turns each compiled body into an immediate yield. */
+   interp_bridge_set_master_deadline(0);
+@@ -132,6 +136,8 @@
+                 (to_vblank ? to_vblank : BFD_MASTER_CYCLES_PER_FIELD);
+   }
+ 
++  rtl_cpu_speed_frame_begin();   /* gabbycat4 faster CPU: new field */
++
+   if (booting) {
+     s_resume_pc = reset_vector();
+   } else {
+@@ -174,6 +180,7 @@
+       (void)interp_bridge_run_until_quiescent(&g_cpu, s_resume_pc);
+       interp_bridge_set_master_deadline(0);
+       update_resume_pc();
++      rtl_cpu_speed_settle();   /* gabbycat4: the field holds more CPU work */
+       if (interp_bridge_lle_took_wai())
+         s_wai_halted = true;
+     }
+@@ -265,6 +272,14 @@
+   ppu_rasterRenderEnd(g_ppu);
+ }
+ 
++/* gabbycat4: faster CPU option, forwarded to common_rtl (see there). */
++void snes_beam_frame_driver_set_cpu_speed(unsigned percent) { rtl_cpu_speed_set(percent); }
++unsigned snes_beam_frame_driver_cpu_speed(void) { return rtl_cpu_speed(); }
++void snes_beam_frame_driver_cpu_speed_stats(uint64_t *fields, uint64_t *fields_helped,
++                                            uint64_t *clocks_returned) {
++  rtl_cpu_speed_stats(fields, fields_helped, clocks_returned);
++}
++
+ void snes_beam_frame_driver_reset(void) {
+   s_resume_pc = 0;
+   s_wai_halted = false;
+--- a/runner/src/beam_frame_driver.h
++++ b/runner/src/beam_frame_driver.h
+@@ -37,5 +37,12 @@
+ } SnesBeamFrameState;
+ void snes_beam_frame_driver_capture(SnesBeamFrameState *state);
+ int snes_beam_frame_driver_restore(const SnesBeamFrameState *state);
++/* gabbycat4: CPU speed in percent (100 = original timing, up to 400). The
++ * CPU's own work costs 100/percent of its clocks; field, beam and APU time
++ * are unchanged. Host configuration, not saved in savestates. */
++void snes_beam_frame_driver_set_cpu_speed(unsigned percent);
++unsigned snes_beam_frame_driver_cpu_speed(void);
++void snes_beam_frame_driver_cpu_speed_stats(uint64_t *fields, uint64_t *fields_helped,
++                                            uint64_t *clocks_returned);
+ 
+ #endif /* SNESRECOMP_BEAM_FRAME_DRIVER_H */
+--- a/runner/src/common_rtl.c
++++ b/runner/src/common_rtl.c
+@@ -294,10 +294,70 @@
+ static int16 g_audio_last_output_r;
+ static void rtl_sync_apu_frame_boundary(void);
+ 
++/* gabbycat4: faster CPU (see common_rtl.h). */
++static unsigned s_cpu_speed = 100;
++static uint64_t s_cpu_speed_mark;
++static uint64_t s_cpu_given_field, s_cpu_given_total, s_cpu_given_fields, s_cpu_fields;
++
++/* What the rest of the machine sees of a raw CPU clock: CPU clocks since the
++ * mark count 100/p. Pure (no state change), so it is safe mid-instruction. */
++uint64_t rtl_cpu_speed_view(uint64_t raw) {
++  if (s_cpu_speed <= 100 || !s_guest_main_thread || raw <= s_cpu_speed_mark) return raw;
++  return s_cpu_speed_mark + (raw - s_cpu_speed_mark) * 100u / s_cpu_speed;
++}
++
++/* Raw CPU clocks that the rest of the machine sees as `real` clocks (DMA). */
++uint64_t rtl_cpu_speed_raw_clocks(uint64_t real) {
++  if (s_cpu_speed <= 100 || !s_guest_main_thread) return real;
++  return (real * s_cpu_speed + 99u) / 100u;
++}
++
++/* Make the CPU clock what everyone has been seeing. Only between
++ * instructions (the frame driver, a vblank fast-forward). */
++void rtl_cpu_speed_settle(void) {
++  if (s_cpu_speed <= 100 || !s_guest_main_thread) return;
++  uint64_t raw = g_cpu.master_cycles, m = rtl_cpu_speed_view(raw);
++  if (m < raw) {
++    g_cpu.master_cycles = m;
++    if (g_cpu.coprocessor_master_cycles > m) g_cpu.coprocessor_master_cycles = m;
++    if (g_apu_last_sync_master > m) g_apu_last_sync_master = m;
++    s_cpu_given_field += raw - m;
++  }
++  s_cpu_speed_mark = m;
++}
++
++void rtl_cpu_speed_mark(void) {
++  if (s_cpu_speed <= 100 || !s_guest_main_thread) return;
++  s_cpu_speed_mark = g_cpu.master_cycles;
++}
++
++void rtl_cpu_speed_frame_begin(void) {
++  if (s_cpu_given_field) { s_cpu_given_total += s_cpu_given_field; ++s_cpu_given_fields; }
++  s_cpu_given_field = 0;
++  ++s_cpu_fields;
++  s_cpu_speed_mark = g_cpu.master_cycles;
++}
++
++static uint64_t rtl_cpu_speed_sync_filter(uint64_t master_clock) {
++  return rtl_cpu_speed_view(master_clock);
++}
++
++void rtl_cpu_speed_set(unsigned percent) {
++  s_cpu_speed = percent < 100 ? 100 : percent > 400 ? 400 : percent;
++  snes_set_master_clock_sync_filter(s_cpu_speed > 100 ? rtl_cpu_speed_sync_filter : NULL);
++}
++unsigned rtl_cpu_speed(void) { return s_cpu_speed; }
++void rtl_cpu_speed_stats(uint64_t *fields, uint64_t *fields_helped, uint64_t *clocks_returned) {
++  if (fields) *fields = s_cpu_fields;
++  if (fields_helped) *fields_helped = s_cpu_given_fields;
++  if (clocks_returned) *clocks_returned = s_cpu_given_total;
++}
++
+ static uint64_t rtl_apu_guest_cycle(void) {
++  const uint64_t now = rtl_cpu_speed_view(g_cpu.master_cycles);   /* gabbycat4 */
+   if (g_extended_frame_timing)
+-    return rtl_apu_clock_now(&g_apu_frame_clock, g_cpu.master_cycles);
+-  uint64_t within = g_cpu.master_cycles - g_apu_frame_start_master;
++    return rtl_apu_clock_now(&g_apu_frame_clock, now);
++  uint64_t within = now - g_apu_frame_start_master;
+   if (within >= RTL_MASTER_CYCLES_PER_FRAME)
+     within = RTL_MASTER_CYCLES_PER_FRAME - 1;
+   return (uint64_t)snes_frame_counter * RTL_APU_CYCLES_PER_FRAME +
+--- a/runner/src/common_rtl.h
++++ b/runner/src/common_rtl.h
+@@ -59,6 +59,21 @@
+  * Audio stays on one carried guest clock across multi-frame work. Existing
+  * hosts retain their timing until they adopt this contract. */
+ void RtlEnableExtendedFrameTiming(void);
++/* gabbycat4: faster CPU (removes a game's own slowdown). At p percent the
++ * CPU's own work costs 100/p of its master clocks. The scaling is applied
++ * lazily, just before anything else looks at the clock (beam sync, APU sync)
++ * and after each CPU run, so nothing ever sees unscaled CPU time. Parked
++ * time, DMA and vblank fast-forwards stay real time: field length, raster
++ * lines and the APU's time per field do not change (music keeps its tempo).
++ * 100 = original timing; every call is then a no-op. Guest thread only. */
++void rtl_cpu_speed_set(unsigned percent);
++unsigned rtl_cpu_speed(void);
++uint64_t rtl_cpu_speed_view(uint64_t raw);        /* clock as beam/APU see it */
++uint64_t rtl_cpu_speed_raw_clocks(uint64_t real); /* real time (DMA) in raw CPU clocks */
++void rtl_cpu_speed_settle(void);   /* between instructions: CPU clock := its view */
++void rtl_cpu_speed_mark(void);     /* the clock now is real time (after a park/jump) */
++void rtl_cpu_speed_frame_begin(void);
++void rtl_cpu_speed_stats(uint64_t *fields, uint64_t *fields_helped, uint64_t *clocks_returned);
+ double RtlLastFramePeriods(void);
+ bool rtl_apu_extended_frame_timing(void);
+ void rtl_apu_snapshot_pacing(uint64_t *frame_start_master, uint8_t *frame_time_valid);
+--- a/runner/src/common_cpu_infra.c
++++ b/runner/src/common_cpu_infra.c
+@@ -62,7 +62,8 @@
+ }
+ 
+ static void rtl_snes_charge_master_cycles(Snes *snes, uint64_t clocks) {
+-  g_cpu.master_cycles += clocks;
++  /* gabbycat4 faster CPU: DMA time is real time, the beam must see `clocks`. */
++  g_cpu.master_cycles += rtl_cpu_speed_raw_clocks(clocks);
+   snes_sync_master_clock(snes, g_cpu.master_cycles);
+ }
+ 
+--- a/runner/src/snes/snes.c
++++ b/runner/src/snes/snes.c
+@@ -80,6 +80,11 @@
+   s_master_clock_charge_hook = hook;
+ }
+ 
++static SnesMasterClockSyncFilter s_master_clock_sync_filter;
++void snes_set_master_clock_sync_filter(SnesMasterClockSyncFilter filter) {
++  s_master_clock_sync_filter = filter;
++}
++
+ void snes_set_wram_write_log_hook(SnesWramWriteLogHook hook) {
+   s_wram_write_log_hook = hook;
+ }
+@@ -601,6 +606,7 @@
+ void snes_beam_hold(int hold) { s_beam_hold = hold; }
+ 
+ void snes_sync_master_clock(Snes *snes, uint64_t master_clock) {
++  if (s_master_clock_sync_filter) master_clock = s_master_clock_sync_filter(master_clock);
+   if (s_beam_hold) return;
+   if (master_clock < snes->beamMasterLast) {
+     snes->beamMasterLast = master_clock;
+--- a/runner/src/snes/snes.h
++++ b/runner/src/snes/snes.h
+@@ -146,6 +146,10 @@
+  * step that can jump over h=1024 and drop that line's HDMA transfer (SimCity
+  * scenario view: every 4th scanline one line late, issue #63). */
+ void snes_set_master_clock_charge_hook(SnesMasterClockChargeHook hook);
++/* gabbycat4: optional filter applied to the clock passed to
++ * snes_sync_master_clock (faster-CPU option; see common_rtl.h). */
++typedef uint64_t (*SnesMasterClockSyncFilter)(uint64_t master_clock);
++void snes_set_master_clock_sync_filter(SnesMasterClockSyncFilter filter);
+ /* Notified on every direct WRAM store that bypasses cpu_write8/16 (WMDATA
+  * $2180, snes_write's WRAM and mirror stores, i.e. DMA A-bus writes). */
+ void snes_set_wram_write_log_hook(SnesWramWriteLogHook hook);
+--- a/runner/src/snes/interp_bridge.c
++++ b/runner/src/snes/interp_bridge.c
+@@ -36,6 +36,8 @@
+  * poll, so the SPC stayed frozen (co-sim: A outPorts=0000 vs B outPorts=AABB).
+  * Scoped to the interp tier â€” the compiled path never enters here. */
+ extern Snes *g_snes;
++void rtl_cpu_speed_mark(void);   /* gabbycat4, common_rtl.c */
++void rtl_cpu_speed_settle(void);
+ extern uint64_t g_apu_last_sync_master;   /* common_rtl.c â€” keep synced so a bounce's accurate-mode delta excludes interp opcodes */
+ extern int g_interp_apu_driving;          /* common_rtl.c â€” suppresses the per-touch synthetic catch-up while set */
+ #ifdef SNES_COSIM
+@@ -3026,6 +3028,7 @@
+                          * the title task's real work). Use the variant's
+                          * real step so the FF lands on the same read the
+                          * LLE makes when it detects the vblank edge. */
++                        rtl_cpu_speed_settle();   /* gabbycat4: target on the real beam grid */
+                         const uint64_t step = is_long ? 48u : 42u;
+                         uint64_t target = 0;
+                         if (is_bpl && v >= 1u && v < 225u) {
+@@ -3093,6 +3096,7 @@
+                                 if (!_chunk) break;
+                             }
+                             cpu->master_cycles = target;
++                            rtl_cpu_speed_mark();   /* gabbycat4: skipped wait = real time */
+                             snes_sync_master_clock(g_snes, target);
+                         }
+                     }

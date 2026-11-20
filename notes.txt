@@ -547,3 +547,50 @@ Round 7c (Nov 20): guards jump when Nasir walks next to/in front of them.
 - t8, t2x/t2h/t2v/t1c PASS; compile clean with the real flags. Before-copy: /tmp only.
 - Doors: still open. Next if they still judder: log the background source near doors (VRAM window
   vs room map) and A/B with KDE "Allow tearing in fullscreen" off.
+
+Round 8 (Nov 20): optional faster CPU ("remove slowdown"). User after 7c: guards, doors, NPCs good;
+only the town slowdown left.
+- How the engine makes slowdown (beam_frame_driver.c): each field the CPU runs until the field's
+  master-clock end (357,368 clocks, beam-aligned); a step whose work does not fit takes 3 fields.
+  The APU gets a fixed 17,088 SPC cycles per field (extended frame timing is off for Lagoon), so
+  CPU time inside a field can change without changing the music's tempo.
+- Engine change (patch): [Lagoon] CpuSpeed / LAGOON_CPU_SPEED percent (100 = original, max 400).
+  After every CPU run (main loop slice and interrupt handlers), the clocks it charged that NOTHING
+  has seen yet (above the beam's last sync and the APU's last sync) are handed back to the CPU at
+  1 - 100/p. Field length, vblank, raster IRQ lines, APU time per field unchanged; the existing
+  run loop then simply continues inside the same field (geometric: total work = p% of the field).
+  Clocks under a line are not handed back (bounds the passes). Refresh watermark reset after.
+  Not saved in savestates (host config). Default 100 = byte-for-byte the old behaviour.
+- Stats at exit on stderr: [lagoon-cpu-speed] fields, fields_given_time, clocks per such field.
+  smooth.log settings line has cpu_speed.
+- New tools/smooth-tests/slow_steps.py: slow (3+ field) steps per room from motion.log.
+  Session 7 at 100%: town 40 of 1359 steps slow (2.9%), worst 19 in 2 s; cave/guards/church 0.
+- patches: lagoon-framework.patch beam_frame_driver.c/.h sections replaced (reverse-check passes,
+  fresh apply on 98f4183 == tree except submodules/pycache); gabbycat4-smooth.patch has our hunks.
+  Compile clean (beam_frame_driver.c, lagoon_smooth.c, real flags); t8 + replay unchanged.
+
+Round 8b (Nov 20): round 8's hand-back did nothing in play: session 8 at 150% gave time on 2 of
+19,193 fields; town still 156 slow of 7,903 steps (2.0%, worst 14 in 2 s). Cause: the APU is paced
+every 1,024 master clocks (rtl_apu_pace_check, SNESRECOMP_LLE_APU_FLUSH_THRESH), so there was never
+an "unseen" stretch to hand back. User's chug spots: walking from the town well to the next house,
+past the weapon shop, near the running chicken (also looks blurry/strange -- check later).
+- New design (common_rtl.c, rtl_cpu_speed_*): a VIEW of the CPU clock. CPU clocks since a mark
+  count 100/p. The beam (snes_sync_master_clock filter, new hook in snes.c) and the APU
+  (rtl_apu_guest_cycle) only ever see the view, so they keep real time. The CPU clock itself is
+  set to its view ("settle") only BETWEEN instructions: after each run in the frame driver, after
+  interrupts, before parking, before a vblank fast-forward (whose target uses the clock's field
+  phase). Never mid-instruction: the native-block commit checks master-prior >= opcode cost and
+  would abort. DMA time is real: it is added as raw clocks x p/100 (view sees exactly the DMA's).
+  Parked time and fast-forwards set the mark (real time). Guest thread only (thread-local flag).
+  At 100 every function returns at once and the filter hook is not installed: original timing.
+- Lagoon side unchanged (snes_beam_frame_driver_set_cpu_speed forwards to rtl_cpu_speed_set).
+- patches: combined patch sections replaced for beam_frame_driver.c/.h, common_rtl.c/.h, snes.c,
+  interp_bridge.c, and NEW sections for common_cpu_infra.c, snes/snes.h. Reverse-check passes,
+  fresh apply on 98f4183 == tree, apply_framework_patch.py: "already applied".
+  gabbycat4-smooth.patch = host_main.c/.h + these 8 files (vs upstream-patched).
+- All six touched C files compile with the real flags.
+Round 8b result (Nov 20, session 9, 150%): user: "perfect... couldn't get it to stutter". Extra time
+on 10,694 of 10,695 fields (~175,600 clocks handed back per field = the CPU's 1/3 at 150%).
+Slow steps: town 0 of 3,283 (was 156 of 7,903 = 2.0%, worst 14 in 2 s), all rooms 0 of 4,484.
+Picture self-checks 159 ok / 0 failed; no APU sync timeouts or errors in profile.txt.
+build-port/config.ini now has CpuSpeed = 150 (code default stays 100 = original timing).

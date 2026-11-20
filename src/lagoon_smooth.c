@@ -36,6 +36,11 @@
 #include <string.h>
 
 #include "lagoon_scene_renderer.h"
+/* Engine (runner/src/beam_frame_driver.h, gabbycat4 patch): optional faster CPU. */
+void snes_beam_frame_driver_set_cpu_speed(unsigned percent);
+unsigned snes_beam_frame_driver_cpu_speed(void);
+void snes_beam_frame_driver_cpu_speed_stats(uint64_t *fields, uint64_t *fields_helped,
+                                            uint64_t *clocks_returned);
 
 enum { kMaxWidth = 1280, kHeight = 224, kMaxStep = 8, kActors = 32, kRing = 16 };
 
@@ -60,6 +65,7 @@ static unsigned s_pps = 60;
 static int s_second_core = 1;           /* [Lagoon] SecondCore, LAGOON_SECOND_CORE */
 static int s_half_pixels = 1;           /* [Lagoon] HalfPixels, LAGOON_HALF_PIXELS */
 static int s_smooth_camera = 1;         /* [Lagoon] SmoothCamera, LAGOON_SMOOTH_CAMERA */
+static unsigned s_cpu_speed = 100;      /* [Lagoon] CpuSpeed, LAGOON_CPU_SPEED (100 = original) */
 enum { kCamAvg = 16 };
 static double s_camq[kCamAvg][2];
 static unsigned s_camq_n, s_camq_pos, s_camq_frame, s_camq_pic;
@@ -115,6 +121,8 @@ static unsigned valid_pps(long v) {
   return v == 120 || v == 180 || v == 240 ? (unsigned)v : 60;
 }
 
+static unsigned valid_speed(long v) { return v < 100 ? 100 : v > 400 ? 400 : (unsigned)v; }
+
 static void read_ini(const char *path) {
   FILE *f = path ? fopen(path, "r") : NULL;
   if (!f) return;
@@ -131,11 +139,18 @@ static void read_ini(const char *path) {
     if (!strcmp(name, "SecondCore")) s_second_core = strtol(value, NULL, 10) != 0;
     if (!strcmp(name, "HalfPixels")) s_half_pixels = strtol(value, NULL, 10) != 0;
     if (!strcmp(name, "SmoothCamera")) s_smooth_camera = strtol(value, NULL, 10) != 0;
+    if (!strcmp(name, "CpuSpeed")) s_cpu_speed = valid_speed(strtol(value, NULL, 10));
   }
   fclose(f);
 }
 
 static void report(void) {
+  uint64_t fields = 0, helped = 0, returned = 0;
+  snes_beam_frame_driver_cpu_speed_stats(&fields, &helped, &returned);
+  fprintf(stderr, "[lagoon-cpu-speed] cpu_speed=%u fields=%llu fields_given_time=%llu "
+          "clocks_given_per_such_field=%.0f\n", snes_beam_frame_driver_cpu_speed(),
+          (unsigned long long)fields, (unsigned long long)helped,
+          helped ? (double)returned / (double)helped : 0.0);
   fprintf(stderr, "[lagoon-smooth] pictures_per_second=%u second_core=%d half_pixels=%d smooth_camera=%d "
           "steps=%llu checks_ok=%llu checks_failed=%llu "
           "inbetween_pictures=%llu renders=%llu pieces_with_character=%llu pieces_alone=%llu\n",
@@ -148,6 +163,7 @@ void LagoonSmooth_AfterConfig(const char *config_path) {
   s_pps = 60;
   s_second_core = 1;
   s_half_pixels = 1;
+  s_cpu_speed = 100;
   read_ini(config_path);
   read_ini("config.local.ini");
   const char *env = getenv("LAGOON_PICTURES");
@@ -156,6 +172,9 @@ void LagoonSmooth_AfterConfig(const char *config_path) {
   if (core && *core) s_second_core = strtol(core, NULL, 10) != 0;
   const char *scam = getenv("LAGOON_SMOOTH_CAMERA");
   if (scam && *scam) s_smooth_camera = strtol(scam, NULL, 10) != 0;
+  const char *speed = getenv("LAGOON_CPU_SPEED");
+  if (speed && *speed) s_cpu_speed = valid_speed(strtol(speed, NULL, 10));
+  snes_beam_frame_driver_set_cpu_speed(s_cpu_speed);
   const char *half = getenv("LAGOON_HALF_PIXELS");
   if (half && *half) s_half_pixels = strtol(half, NULL, 10) != 0;
   if (!once) {
@@ -164,8 +183,8 @@ void LagoonSmooth_AfterConfig(const char *config_path) {
     if (path && *path) {
       s_log = fopen(path, "w");
       if (s_log) {
-        fprintf(s_log, "# settings pictures_per_second=%u second_core=%d half_pixels=%d smooth_camera=%d\n",
-                s_pps, s_second_core, s_half_pixels, s_smooth_camera);
+        fprintf(s_log, "# settings pictures_per_second=%u second_core=%d half_pixels=%d smooth_camera=%d cpu_speed=%u\n",
+                s_pps, s_second_core, s_half_pixels, s_smooth_camera, s_cpu_speed);
         fprintf(s_log, "# frame alpha t drawn reason (one line per presented picture)\n");
       }
     }

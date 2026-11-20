@@ -23,3 +23,12 @@ int LagoonSceneRenderer_RenderMotion2x(uint32_t *out,unsigned width,const Lagoon
   }
   return 1;}
 void LagoonSceneRenderer_SetMotionCache(int on){(void)on;}
+
+/* Engine CPU-speed hooks (beam_frame_driver.c) for offline tests. */
+#include <stdint.h>
+static unsigned s_test_cpu_speed = 100;
+void snes_beam_frame_driver_set_cpu_speed(unsigned p) { s_test_cpu_speed = p; }
+unsigned snes_beam_frame_driver_cpu_speed(void) { return s_test_cpu_speed; }
+void snes_beam_frame_driver_cpu_speed_stats(uint64_t *a, uint64_t *b, uint64_t *c) {
+  if (a) *a = 0; if (b) *b = 0; if (c) *c = 0;
+}

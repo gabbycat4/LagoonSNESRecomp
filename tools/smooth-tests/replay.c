@@ -104,3 +104,12 @@ int main(int argc,char**argv){
   for(int r=0;r<4;r++)printf("room %d: sprite pieces reversing direction %ld of %ld moves\n",r,rev[r],revn[r]);
   for(int r=0;r<4;r++)printf("room %d: pictures %ld, pieces split from their character %ld, jumps > 0.5 px %ld\n",r,pics[r],split[r],jerk[r]);
   return 0;}
+
+/* Engine CPU-speed hooks (beam_frame_driver.c) for offline tests. */
+#include <stdint.h>
+static unsigned s_test_cpu_speed = 100;
+void snes_beam_frame_driver_set_cpu_speed(unsigned p) { s_test_cpu_speed = p; }
+unsigned snes_beam_frame_driver_cpu_speed(void) { return s_test_cpu_speed; }
+void snes_beam_frame_driver_cpu_speed_stats(uint64_t *a, uint64_t *b, uint64_t *c) {
+  if (a) *a = 0; if (b) *b = 0; if (c) *c = 0;
+}
