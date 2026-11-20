@@ -2,6 +2,7 @@
  * The original C284/C2CD/kind handlers remain responsible for all guest work.
  */
 #include "lagoon_wide_multipart.h"
+#include "lagoon_shake.h"
 #include <string.h>
 
 static unsigned word(const uint8_t *p,unsigned a){return p[a]|(unsigned)p[a+1]<<8;}
@@ -66,7 +67,8 @@ static int prop_packet_source(const uint8_t *rom,size_t size,
       !source(rom,size,0x01d8da,31,UINT64_C(0xe5fb5c1ea62cc247))||
       !source(rom,size,0x01d979,2,UINT64_C(0x0983a707b60a6ebf))||
       !source(rom,size,0x01ddad,100,UINT64_C(0xbd87810c8f70831c))||
-      !source(rom,size,0x01de11,84,UINT64_C(0x9ee85f4097be1a2c))||
+      (!source(rom,size,0x01de11,84,UINT64_C(0x9ee85f4097be1a2c))&&
+       !LagoonShake_TableZeroed(rom,size))||   /* gabbycat4: screen shake off */
       !source(rom,size,0x05acbc,9,UINT64_C(0x9240a936949bd754))||
       !source(rom,size,0x05c10a,3,UINT64_C(0xaa256a1a94cb4dfd)))return 0;
   return 1;

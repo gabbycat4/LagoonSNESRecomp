@@ -1,21 +1,24 @@
-# Lagoon round 12: several cores draw each picture (fixes the occasional skipped picture)
+# Lagoon round 14: Samson in one piece, clearer Comfort tab, settings logged
 # Every line is a fish comment or a command, so a whole block can be pasted.
-# Tell Claude "done" after the runs.
 
-# --- 1. Rebuild (ALWAYS first after Claude changes code) ---
+# --- 1. Rebuild ---
 cd ~/Projects/LagoonSNESRecomp
 cmake --build build-port --target LagoonSNESRecomp 2>&1 | tail -5
-# If the last lines say "error", send them to Claude instead of running.
 
-# --- 2. Play at 240 with 3 drawing cores (the new default). Same places as last time, ~4 min ---
+# --- 2. Set the options, then QUIT (240 needs a restart) ---
+# Options > Comfort: Screen shake -> Off.  Pictures per second -> it shows "180 > 240".
+# Quit the game. The next start runs at 240 with the shake off.
 cd ~/Projects/LagoonSNESRecomp
-env LAGOON_PICTURES=240 LAGOON_SMOOTH_LOG=smooth.log LAGOON_MOTION_LOG=motion.log SNESRECOMP_FRAME_TIMING=timing.csv SNESRECOMP_HOST_PROFILE=1 mangohud ./build-port/LagoonSNESRecomp --no-launcher --rom lagoon.sfc 2> profile.txt
+./build-port/LagoonSNESRecomp --no-launcher --rom lagoon.sfc 2> settings.txt
+grep "lagoon-settings\|lagoon-shake" settings.txt
+# Expect: saved ScreenShake = 0, saved PicturesPerSecond = 240, screen shake OFF
 
-# --- 3. Tell Claude "done": still a stutter now and then? (Claude counts the skipped pictures) ---
-# Optional comparison: the same with one drawing core (the old way):
-#   add LAGOON_DRAW_THREADS=1 right after env
+# --- 3. Start again and fight Samson (logs on) ---
+cd ~/Projects/LagoonSNESRecomp
+env LAGOON_SMOOTH_LOG=smooth.log LAGOON_MOTION_LOG=motion.log LAGOON_OAM_LOG=oam.log mangohud ./build-port/LagoonSNESRecomp --no-launcher --rom lagoon.sfc 2> profile.txt
+# MangoHud should show ~240. Tell Claude "done": Samson and Nasir steady?
 
 # --- 4. Commit when happy ---
 cd ~/Projects/LagoonSNESRecomp
-git --no-optional-locks add src/lagoon_scene_renderer.c src/lagoon_scene_renderer.h src/lagoon_smooth.c src/lagoon_smooth.h src/lagoon_settings.c src/main.c tests/lagoon_settings_test.c patches/lagoon-framework.patch patches/gabbycat4-smooth.patch tools/smooth-tests/tbands.c tools/smooth-tests/stub.c tools/smooth-tests/replay.c notes.txt STEPS.txt
-git --no-optional-locks commit -m "240 pictures (59.94 fields/s, engine hook) and pictures drawn by several cores (bands, identical pixels)"
+git --no-optional-locks add CMakeLists.txt src/lagoon_shake.c src/lagoon_shake.h src/lagoon_wide_multipart.c src/lagoon_smooth.c src/lagoon_smooth.h src/lagoon_settings.c src/lagoon_settings.h src/main.c tests/lagoon_settings_test.c tools/smooth-tests/tshake.c tools/smooth-tests/stub.c tools/smooth-tests/replay.c notes.txt STEPS.txt
+git --no-optional-locks commit -m "Screen shake off; Samson's measured shape (one piece); Comfort tab shows restart values; settings saves logged"

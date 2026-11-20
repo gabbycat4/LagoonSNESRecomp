@@ -38,7 +38,7 @@ int LagoonSettings_SaveZoom(unsigned percent);
 /* gabbycat4 Comfort tab: after a deliberate edit, the host takes the live
  * options once (steady camera 0/1, CPU speed percent) and applies them.
  * Pictures per second and half pixels are saved for the next start. */
-int LagoonSettings_TakeComfortChange(unsigned *steady_camera,unsigned *cpu_speed);
+int LagoonSettings_TakeComfortChange(unsigned *steady_camera,unsigned *cpu_speed,unsigned *screen_shake);
 
 void LagoonSettings_Command(unsigned command);
 void LagoonSettings_Tick(uint32_t human,uint32_t ticks);

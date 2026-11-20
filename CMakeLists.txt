@@ -122,6 +122,7 @@ add_executable(LagoonSNESRecomp
     src/lagoon_return.c
     src/lagoon_return_runtime.c
     src/lagoon_settings.c
+    src/lagoon_shake.c
     src/lagoon_ui.c
     src/lagoon_achievements.c
     src/lagoon_achievement_ui.c

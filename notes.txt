@@ -683,3 +683,53 @@ Fields with a skipped picture 59 (0.34/s; round 11: 168 in 259 s = 0.65/s), none
 some clusters (busy spots). compose mean 1.12 -> 0.90 ms, 99th 3.46 ms, max 7.58 ms;
 band pictures 34,265; self-checks 159 ok / 0 failed. Next if wanted: DrawThreads=4 A/B, or draw
 the next picture ahead (the per-field base compose + raster capture still sit on the main thread).
+
+Round 13 (Nov 20): screen shake off (Comfort tab), from the game code (no Samson save yet).
+- Boss quake = $01:DDAD (Lagoon_Boss_UpdateQuake, "first boss quake" in the room hazard dispatch
+  $01:D8DA). While $03AE is set it plays sound $73 and, for 42 steps, copies the word table at
+  $01:DE11 (-4,+8,-8,+8 ... -2,+1) into DP $90/$92, then clears them. Readers: $01:8167 and $02:D0DB
+  add $90/$92 to the BG1/BG2 VERTICAL scroll shadows ($0202/$0206 = camera $0482/$0486 + offset);
+  $01:C0E0/$01:C463 add them to sprite y. Started by boss code at $02:9099 and $02:9F98 (STA $03AE).
+  The neighbouring handler $01:DED0 drifts $90/$92 by +3/+1 per step with a palette load (water/sky
+  drift, NOT a shake): untouched.
+- Off = the 84 table bytes read as zero (src/lagoon_shake.c): authenticated by its FNV hash, zeroed in
+  the image before the machine copies it, and live on the running copy (g_rom, a malloc'd copy in
+  cart.c) when toggled in the menu. The quake still starts, plays its sound and runs its 42 steps;
+  the offsets stay 0. Recompiled and native69 code read the table at run time (no baked values).
+- lagoon_wide_multipart.c (room 0x40 prop) hash-checks that table: now also accepts the zeroed one
+  (its draw offset is then 0, matching $90 = 0).
+- [Lagoon] ScreenShake (1 default), LAGOON_SCREEN_SHAKE; Comfort row "Screen shake" On/Off, live;
+  TakeComfortChange now also returns it. Rows 40 px apart (5 rows).
+- Unknown until the fight is recorded: whether Samson uses this quake. If it still shakes with Off,
+  motion.log (camera c= vs scroll s=) will show which mechanism (e.g. Elf Field's camera quake).
+- Tests: settings suite PASS (5 rows, ScreenShake persistence, live handoff); tools/smooth-tests/
+  tshake.c with the real ROM PASS (63 bytes change, all inside the table; restore; live; refusal);
+  t8 PASS; main.c, lagoon_smooth.c, lagoon_settings.c, lagoon_wide_multipart.c, lagoon_shake.c
+  compile with the real flags. CMakeLists.txt: + src/lagoon_shake.c.
+
+Round 14 (Nov 20): user: "240 in the menu didn't work"; "screen shake fixed but Samson (and I) shake
+like crazy". Session 13 (room $40 = Samson, 110 s, Options opened 4 times).
+- The session ran at 180 with screen_shake=1 (settings line), and the scroll-minus-camera offset
+  shows ten quakes (fields 2701-4471), all after the last Options close: the quake was ON during
+  the fight. The background looked steady anyway because the smoothing draws it from the camera
+  word (no quake); characters' own pieces too; pieces of nobody kept the quake -> split images.
+- config.ini (written 10:14:00, during the 4th Options visit) has PicturesPerSecond = 180 and no
+  ScreenShake line. The writer works on a copy of this exact file (saved 240 and ScreenShake = 0);
+  the engine's own WriteConfigFile keeps unknown lines. Most likely the 240 change was cycled on
+  (the row needed a restart and showed nothing changing). Now: every save prints
+  "[lagoon-settings] saved KEY = V in config.ini" (or COULD NOT SAVE), every shake change prints
+  "[lagoon-shake] screen shake ON/OFF (...)", and the restart rows show "now > after restart"
+  (e.g. "180 > 240") with "RESTART to apply".
+- Samson = actor slot 1, type 3, palette 3, 64 px wide and ~100 px tall (x -48..+16, y -96..+8 from
+  his position; 64,092 pieces). The generic box covered his legs only: 38% of his pieces went to
+  nobody on calm fields. extent() type 3 = x -52..20, y -100..10.
+  Replay of session 13: calm Samson pieces to nobody 42,270 -> 642; Samson reversals during quakes
+  2,406 -> 32 (calm 0.6% -> 0.5%). Remaining quake reversals are nobody's pieces carrying the
+  game's quake (gone with Screen shake Off). Sessions 9 and 10 identical; t8 PASS; compile clean.
+- Nasir: 4% of his pieces to nobody in this fight even when calm (88,533 vs 3,714). Check next time.
+Round 14 result (Nov 20, Samson at 240, shake OFF): user "didn't see any of the flaws".
+settings.txt shows ScreenShake = 0 saved and the shake turned OFF live; PicturesPerSecond cycled
+240 > 60 > 120 > 180 > 240 (each press is a save; the old row looked like nothing happened).
+Session: 240, screen_shake=0, quake offsets 1 field of 1003 (table zeroed). Room $40: Samson pieces
+92,241 his / 408 nobody; reversals Samson 22 of 90,312, nobody 109 of 6,186, Nasir 648 of 66,020.
+Open (minor, invisible to the user): 3,285 Nasir-palette pieces owned by another slot (~5%).

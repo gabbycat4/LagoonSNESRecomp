@@ -37,9 +37,9 @@ static int zoom_save_failed;
 /* gabbycat4 Comfort tab: eye-comfort options ([Lagoon] keys of lagoon_smooth.c).
  * Steady camera and slowdown removal apply live (the host takes the change);
  * pictures per second and half pixels apply the next time the game starts. */
-enum {COMFORT_CAMERA,COMFORT_SLOWDOWN,COMFORT_PICTURES,COMFORT_HALF,COMFORT_ROWS};
-static unsigned comfort_selected,comfort_camera=1,comfort_cpu=100,comfort_pictures=60,comfort_half=1;
-static unsigned comfort_changed;
+enum {COMFORT_CAMERA,COMFORT_SLOWDOWN,COMFORT_SHAKE,COMFORT_PICTURES,COMFORT_HALF,COMFORT_ROWS};
+static unsigned comfort_selected,comfort_camera=1,comfort_cpu=100,comfort_shake=1,comfort_pictures=60,comfort_half=1;
+static unsigned comfort_changed,comfort_pictures_now=60,comfort_half_now=1;   /* what this session runs with */
 static int comfort_save_failed;
 #ifdef _WIN32
 static wchar_t *wide(const char *text){
@@ -132,7 +132,10 @@ static int persist_setting(const char *key,unsigned value,unsigned default_value
  size_t plen=strlen(prefix),llen=strlen(line),total=replace_begin+plen+llen+bytes-replace_end;
  char *after=malloc(total);if(!after){free(before);return 0;}
  memcpy(after,before,replace_begin);memcpy(after+replace_begin,prefix,plen);memcpy(after+replace_begin+plen,line,llen);memcpy(after+replace_begin+plen+llen,before+replace_end,bytes-replace_end);
- int wrote=commit_setting_bytes(before,bytes,after,total);free(after);free(before);return wrote;
+ int wrote=commit_setting_bytes(before,bytes,after,total);free(after);free(before);
+ /* gabbycat4: every save is visible in the game's log (stderr). */
+ fprintf(stderr,"[lagoon-settings] %s %s = %u in %s\n",wrote?"saved":"COULD NOT SAVE",key,value,config_file);
+ return wrote;
 }
 /* Zoom has fractional values. Locate only its exact existing token so inline
  * comments, indentation and all unrelated bytes survive the edit unchanged. */
@@ -207,13 +210,17 @@ void LagoonSettings_Configure(const char *path){
  value=1;if(text&&!locate(text,bytes,"SmoothCamera",1,1,&a,&b,&c,&value,&section,&nl))value=1;comfort_camera=value;
  value=100;if(text&&!locate(text,bytes,"CpuSpeed",100,400,&a,&b,&c,&value,&section,&nl))value=100;comfort_cpu=value<100?100:value;
  value=60;if(text&&!locate(text,bytes,"PicturesPerSecond",60,240,&a,&b,&c,&value,&section,&nl))value=60;
- comfort_pictures=value==120||value==180||value==240?value:60;
- value=1;if(text&&!locate(text,bytes,"HalfPixels",1,1,&a,&b,&c,&value,&section,&nl))value=1;comfort_half=value;
+ comfort_pictures=value==120||value==180||value==240?value:60;comfort_pictures_now=comfort_pictures;
+ value=1;if(text&&!locate(text,bytes,"HalfPixels",1,1,&a,&b,&c,&value,&section,&nl))value=1;comfort_half=value;comfort_half_now=value;
+ value=1;if(text&&!locate(text,bytes,"ScreenShake",1,1,&a,&b,&c,&value,&section,&nl))value=1;comfort_shake=value;
  free(text);
 }
-int LagoonSettings_TakeComfortChange(unsigned *steady_camera,unsigned *cpu_speed){
+int LagoonSettings_TakeComfortChange(unsigned *steady_camera,unsigned *cpu_speed,unsigned *screen_shake){
  if(!comfort_changed)return 0;comfort_changed=0;
- if(steady_camera)*steady_camera=comfort_camera;if(cpu_speed)*cpu_speed=comfort_cpu;return 1;
+ if(steady_camera)*steady_camera=comfort_camera;
+ if(cpu_speed)*cpu_speed=comfort_cpu;
+ if(screen_shake)*screen_shake=comfort_shake;
+ return 1;
 }
 static void comfort_change(unsigned command){
  int back=command==LAGOON_SETTINGS_LEFT;
@@ -223,6 +230,9 @@ static void comfort_change(unsigned command){
  }else if(comfort_selected==COMFORT_SLOWDOWN){
   comfort_cpu=comfort_cpu>100?100:150;comfort_changed=1;
   comfort_save_failed=!persist_setting("CpuSpeed",comfort_cpu,100,400);
+ }else if(comfort_selected==COMFORT_SHAKE){
+  comfort_shake=!comfort_shake;comfort_changed=1;
+  comfort_save_failed=!persist_setting("ScreenShake",comfort_shake,1,1);
  }else if(comfort_selected==COMFORT_PICTURES){
   static const unsigned choices[]={60,120,180,240};unsigned i=0;
   while(i<4&&choices[i]!=comfort_pictures)i++;if(i==4)i=back?0:3;
@@ -362,21 +372,26 @@ static void tabs(void){
  }
 }
 static void comfort_image(void){
- static const char *names[]={"Steady camera","Remove slowdown","Pictures per second","Half pixels"};
+ static const char *names[]={"Steady camera","Remove slowdown","Screen shake","Pictures per second","Half pixels"};
  static const char *help[]={"Evens out the camera's stop-and-go on diagonal walks.",
   "More processor time: busy places never chug. Music unchanged.",
-  "More = smoother, less blur. 240 needs a 240 Hz screen. Next start.",
-  "Motion in half-pixel steps (120 or more). Applies at next start."};
+  "Off keeps the picture still when a boss quakes the ground.",
+  "Smoother, less blur. 240 needs a 240 Hz screen. RESTART to apply.",
+  "Motion in half-pixel steps (120 or more). RESTART to apply."};
  for(unsigned row=0;row<COMFORT_ROWS;row++){
-  int y=92+(int)row*48;char value[16];
-  if(row==comfort_selected){rect(20,y-5,600,45,LAGOON_UI_SELECT);LagoonUI_Cursor(panel,WIDTH,HEIGHT,29,y+5,LAGOON_UI_GOLD);}
+  int y=88+(int)row*40;char value[16];
+  if(row==comfort_selected){rect(20,y-4,600,38,LAGOON_UI_SELECT);LagoonUI_Cursor(panel,WIDTH,HEIGHT,29,y+5,LAGOON_UI_GOLD);}
   text(50,y,names[row],LAGOON_UI_FG);
   if(row==COMFORT_CAMERA)snprintf(value,sizeof value,"%s",comfort_camera?"On":"Off");
   else if(row==COMFORT_SLOWDOWN){if(comfort_cpu==100)snprintf(value,sizeof value,"Off");else if(comfort_cpu==150)snprintf(value,sizeof value,"On");else snprintf(value,sizeof value,"%u%%",comfort_cpu);}
-  else if(row==COMFORT_PICTURES)snprintf(value,sizeof value,"%u",comfort_pictures);
-  else snprintf(value,sizeof value,"%s",comfort_half?"On":"Off");
+  else if(row==COMFORT_SHAKE)snprintf(value,sizeof value,"%s",comfort_shake?"On":"Off");
+  /* Next-start options show "now -> after restart" until the game restarts. */
+  else if(row==COMFORT_PICTURES){if(comfort_pictures==comfort_pictures_now)snprintf(value,sizeof value,"%u",comfort_pictures);
+   else snprintf(value,sizeof value,"%u > %u",comfort_pictures_now,comfort_pictures);}
+  else if(comfort_half==comfort_half_now)snprintf(value,sizeof value,"%s",comfort_half?"On":"Off");
+  else snprintf(value,sizeof value,"%s > %s",comfort_half_now?"On":"Off",comfort_half?"On":"Off");
   text(602-LagoonUI_TextWidth(value,1),y,value,LAGOON_UI_GOLD);
-  LagoonUI_TextSmall(panel,WIDTH,HEIGHT,50,y+24,help[row],LAGOON_UI_DIM);
+  LagoonUI_TextSmall(panel,WIDTH,HEIGHT,50,y+21,help[row],LAGOON_UI_DIM);
  }
 }
 static void journal_image(void){

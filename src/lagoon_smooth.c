@@ -36,6 +36,7 @@
 #include <string.h>
 
 #include "lagoon_scene_renderer.h"
+#include "lagoon_shake.h"
 /* Engine (runner/src/beam_frame_driver.h, gabbycat4 patch): optional faster CPU. */
 void snes_beam_frame_driver_set_cpu_speed(unsigned percent);
 unsigned snes_beam_frame_driver_cpu_speed(void);
@@ -66,7 +67,8 @@ static int s_second_core = 1;           /* [Lagoon] SecondCore, LAGOON_SECOND_CO
 static int s_half_pixels = 1;           /* [Lagoon] HalfPixels, LAGOON_HALF_PIXELS */
 static int s_smooth_camera = 1;         /* [Lagoon] SmoothCamera, LAGOON_SMOOTH_CAMERA */
 static unsigned s_cpu_speed = 100;      /* [Lagoon] CpuSpeed, LAGOON_CPU_SPEED (100 = original) */
-static unsigned s_draw_threads = 3;     /* [Lagoon] DrawThreads, LAGOON_DRAW_THREADS (1-4; cores per picture) */
+static unsigned s_draw_threads = 3;
+static int s_screen_shake = 1;          /* [Lagoon] ScreenShake, LAGOON_SCREEN_SHAKE (0 = boss quake off) */     /* [Lagoon] DrawThreads, LAGOON_DRAW_THREADS (1-4; cores per picture) */
 static volatile unsigned s_cpu_speed_wanted = 100;   /* Comfort menu, applied on the game thread */
 enum { kCamAvg = 16 };
 static double s_camq[kCamAvg][2];
@@ -145,6 +147,7 @@ static void read_ini(const char *path) {
     if (!strcmp(name, "HalfPixels")) s_half_pixels = strtol(value, NULL, 10) != 0;
     if (!strcmp(name, "SmoothCamera")) s_smooth_camera = strtol(value, NULL, 10) != 0;
     if (!strcmp(name, "CpuSpeed")) s_cpu_speed = valid_speed(strtol(value, NULL, 10));
+    if (!strcmp(name, "ScreenShake")) s_screen_shake = strtol(value, NULL, 10) != 0;
     if (!strcmp(name, "DrawThreads")) s_draw_threads = valid_threads(strtol(value, NULL, 10));
   }
   fclose(f);
@@ -173,6 +176,7 @@ void LagoonSmooth_AfterConfig(const char *config_path) {
   s_half_pixels = 1;
   s_cpu_speed = 100;
   s_draw_threads = 3;
+  s_screen_shake = 1;
   read_ini(config_path);
   read_ini("config.local.ini");
   const char *env = getenv("LAGOON_PICTURES");
@@ -185,6 +189,9 @@ void LagoonSmooth_AfterConfig(const char *config_path) {
   if (speed && *speed) s_cpu_speed = valid_speed(strtol(speed, NULL, 10));
   snes_beam_frame_driver_set_cpu_speed(s_cpu_speed);
   s_cpu_speed_wanted = s_cpu_speed;
+  const char *shake = getenv("LAGOON_SCREEN_SHAKE");
+  if (shake && *shake) s_screen_shake = strtol(shake, NULL, 10) != 0;
+  LagoonShake_Set(s_screen_shake);
   const char *threads = getenv("LAGOON_DRAW_THREADS");
   if (threads && *threads) s_draw_threads = valid_threads(strtol(threads, NULL, 10));
   LagoonSceneRenderer_SetDrawThreads(s_draw_threads);
@@ -196,8 +203,8 @@ void LagoonSmooth_AfterConfig(const char *config_path) {
     if (path && *path) {
       s_log = fopen(path, "w");
       if (s_log) {
-        fprintf(s_log, "# settings pictures_per_second=%u second_core=%d half_pixels=%d smooth_camera=%d cpu_speed=%u draw_threads=%u\n",
-                s_pps, s_second_core, s_half_pixels, s_smooth_camera, s_cpu_speed, s_draw_threads);
+        fprintf(s_log, "# settings pictures_per_second=%u second_core=%d half_pixels=%d smooth_camera=%d cpu_speed=%u draw_threads=%u screen_shake=%d\n",
+                s_pps, s_second_core, s_half_pixels, s_smooth_camera, s_cpu_speed, s_draw_threads, s_screen_shake);
         fprintf(s_log, "# frame alpha t drawn reason (one line per presented picture)\n");
       }
     }
@@ -349,6 +356,11 @@ static void extent(unsigned k, int *x0, int *x1, int *y0, int *y1) {
   if (k == 0) { *x0 = -27; *x1 = 13; *y0 = -35; *y1 = 0; }
   else if (t == 5) { *x0 = -19; *x1 = 3; *y0 = -49; *y1 = -11; }
   else if (t == 1) { *x0 = -13; *x1 = -4; *y0 = -32; *y1 = -2; }
+  /* Type 3 = Samson (room $40), measured Nov 20 from 64,092 pieces: 64 px wide,
+   * ~100 px tall (x -48..+16, y -96..+8). The generic box covered his legs
+   * only; his upper body went to nobody and lagged behind him (38% of his
+   * pieces on calm fields). */
+  else if (t == 3) { *x0 = -52; *x1 = 20; *y0 = -100; *y1 = 10; }
   else { *x0 = -28; *x1 = 12; *y0 = -49; *y1 = 4; }
 }
 static int outside(unsigned k, int dx, int dy) {

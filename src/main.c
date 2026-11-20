@@ -59,6 +59,7 @@
 #include "lagoon_boss_hud.h"
 #include "lagoon_motion_log.h"   /* gabbycat4: LAGOON_MOTION_LOG / LAGOON_OAM_LOG */
 #include "lagoon_smooth.h"       /* gabbycat4: PicturesPerSecond */
+#include "lagoon_shake.h"        /* gabbycat4: screen shake off */
 #include "lagoon_affinity.h"     /* gabbycat4: second-core thread pinning */
 #include "snes/interp_bridge.h"
 #include "snes/ppu.h"
@@ -253,7 +254,7 @@ static void LagoonHost_SettingsRequest(void) {
     if(!snesrecomp_host_frame_is_live())return;
     if(LagoonSettings_TakeQuitRequest()){snesrecomp_request_exit();return;}
     unsigned zoom;if(LagoonSettings_TakeZoomRequest(&zoom))LagoonHost_ApplyZoom(zoom);
-    {unsigned camera,speed;if(LagoonSettings_TakeComfortChange(&camera,&speed)){LagoonSmooth_SetSmoothCamera((int)camera);LagoonSmooth_SetCpuSpeed(speed);}} /* gabbycat4 Comfort tab */
+    {unsigned camera,speed,shake;if(LagoonSettings_TakeComfortChange(&camera,&speed,&shake)){LagoonSmooth_SetSmoothCamera((int)camera);LagoonSmooth_SetCpuSpeed(speed);LagoonShake_Set((int)shake);}} /* gabbycat4 Comfort tab */
     if(LagoonSettings_TakeAchievementsRequest())LagoonHost_OpenAchievements();
     if(LagoonSettings_TakeReturnRequest()){
         LagoonReturnStatus status;
@@ -382,6 +383,9 @@ static void LagoonHost_OnRom(const uint8_t *rom,size_t size) {
     LagoonEasterCollision_Init(rom,size,LagoonHost_CameoBody);
     LagoonQol_SetWorldReadFilter(LagoonHost_WorldRead);
     LagoonFollower_Reset(rom,size);
+    /* gabbycat4: last, after every source check of the original image. */
+    if(LagoonShake_OnRom((uint8_t *)(uintptr_t)rom,size)&&!LagoonShake_On())
+        fprintf(stderr,"[lagoon-shake] screen shake off: boss quake table zeroed\n");
 }
 static unsigned long long sword_appends;
 static const char *sword_report_path;

@@ -256,27 +256,30 @@ int main(int argc,char**argv){
  {
   const char *comfort_doc="\xef\xbb\xbf# keep\r\n[Graphics]\r\nFullscreen = 1\r\n[Lagoon]\r\nPicturesPerSecond = 180\r\nCpuSpeed = 150 # mine\r\n[KeyMap]\r\nPause = p\r\n";
   write_file(path,comfort_doc);LagoonSettings_Configure(path);
-  assert(comfort_camera==1&&comfort_cpu==150&&comfort_pictures==180&&comfort_half==1&&!LagoonSettings_TakeComfortChange(NULL,NULL));
+  assert(comfort_camera==1&&comfort_cpu==150&&comfort_shake==1&&comfort_pictures==180&&comfort_half==1&&!LagoonSettings_TakeComfortChange(NULL,NULL,NULL));
   LagoonSettings_Open();for(unsigned t=0;t<4;t++)LagoonSettings_Command(LAGOON_SETTINGS_NEXT_TAB);assert(active_tab==TAB_COMFORT&&comfort_selected==0);
-  LagoonSettings_Command(LAGOON_SETTINGS_UP);assert(comfort_selected==3);LagoonSettings_Command(LAGOON_SETTINGS_DOWN);assert(comfort_selected==0);
+  LagoonSettings_Command(LAGOON_SETTINGS_UP);assert(comfort_selected==4);LagoonSettings_Command(LAGOON_SETTINGS_DOWN);assert(comfort_selected==0);
   assert(LagoonSettings_Image(&pixels,&width,&height));result=file_read(path,&n);assert(!strcmp(result,comfort_doc));free(result);
   if(argc>2){char out[1024];snprintf(out,sizeof out,"%s.comfort.ppm",argv[2]);FILE*f=fopen(out,"wb");assert(f);fprintf(f,"P6\n%d %d\n255\n",width,height);for(int i=0;i<width*height;i++){unsigned c=pixels[i];fputc((c>>16)&255,f);fputc((c>>8)&255,f);fputc(c&255,f);}fclose(f);}
-  unsigned cam=9,spd=9;
+  unsigned cam=9,spd=9,shk=9;
   LagoonSettings_Command(LAGOON_SETTINGS_ACTIVATE);assert(comfort_camera==0&&!comfort_save_failed);
-  assert(LagoonSettings_TakeComfortChange(&cam,&spd)&&cam==0&&spd==150&&!LagoonSettings_TakeComfortChange(&cam,&spd));
+  assert(LagoonSettings_TakeComfortChange(&cam,&spd,&shk)&&cam==0&&spd==150&&shk==1&&!LagoonSettings_TakeComfortChange(&cam,&spd,&shk));
   result=file_read(path,&n);assert(strstr(result,"SmoothCamera = 0\r\n[KeyMap]")&&strstr(result,"CpuSpeed = 150 # mine\r\n")&&!strncmp(result,"\xef\xbb\xbf# keep",6));free(result);
   LagoonSettings_Command(LAGOON_SETTINGS_DOWN);LagoonSettings_Command(LAGOON_SETTINGS_RIGHT);assert(comfort_cpu==100);
-  assert(LagoonSettings_TakeComfortChange(&cam,&spd)&&cam==0&&spd==100);
+  assert(LagoonSettings_TakeComfortChange(&cam,&spd,&shk)&&cam==0&&spd==100&&shk==1);
   LagoonSettings_Command(LAGOON_SETTINGS_LEFT);assert(comfort_cpu==150);
+  LagoonSettings_Command(LAGOON_SETTINGS_DOWN);LagoonSettings_Command(LAGOON_SETTINGS_ACTIVATE);assert(comfort_selected==2&&comfort_shake==0);
+  assert(LagoonSettings_TakeComfortChange(&cam,&spd,&shk)&&shk==0&&spd==150);
+  result=file_read(path,&n);assert(strstr(result,"ScreenShake = 0\r\n[KeyMap]"));free(result);
   LagoonSettings_Command(LAGOON_SETTINGS_DOWN);LagoonSettings_Command(LAGOON_SETTINGS_RIGHT);assert(comfort_pictures==240);
   LagoonSettings_Command(LAGOON_SETTINGS_RIGHT);assert(comfort_pictures==60);
   LagoonSettings_Command(LAGOON_SETTINGS_RIGHT);assert(comfort_pictures==120);LagoonSettings_Command(LAGOON_SETTINGS_LEFT);assert(comfort_pictures==60);
   LagoonSettings_Command(LAGOON_SETTINGS_LEFT);assert(comfort_pictures==240);
   LagoonSettings_Command(LAGOON_SETTINGS_LEFT);assert(comfort_pictures==180);
   LagoonSettings_Command(LAGOON_SETTINGS_DOWN);LagoonSettings_Command(LAGOON_SETTINGS_ACTIVATE);assert(comfort_half==0);
-  assert(LagoonSettings_TakeComfortChange(&cam,&spd)&&spd==150);
+  assert(!LagoonSettings_TakeComfortChange(&cam,&spd,&shk)); /* next-start options are not live */
   result=file_read(path,&n);assert(strstr(result,"PicturesPerSecond = 180\r\n")&&strstr(result,"CpuSpeed = 150\r\n")&&strstr(result,"HalfPixels = 0\r\n")&&strstr(result,"Fullscreen = 1\r\n")&&strstr(result,"Pause = p\r\n"));free(result);
-  LagoonSettings_Configure(path);assert(comfort_camera==0&&comfort_cpu==150&&comfort_pictures==180&&comfort_half==0);
+  LagoonSettings_Configure(path);assert(comfort_camera==0&&comfort_cpu==150&&comfort_shake==0&&comfort_pictures==180&&comfort_half==0);
   /* A held A with Left/Right changes once (same guard as Display). */
   LagoonSettings_Open();for(unsigned t=0;t<4;t++)LagoonSettings_Command(LAGOON_SETTINGS_NEXT_TAB);
   LagoonSettings_PollOpen(0);LagoonSettings_Tick(0,5000);LagoonSettings_Tick(SNES_PAD_A|SNES_PAD_RIGHT,5010);assert(comfort_camera==1);
@@ -285,7 +288,7 @@ int main(int argc,char**argv){
   LagoonSettings_Open();for(unsigned t=0;t<4;t++)LagoonSettings_Command(LAGOON_SETTINGS_NEXT_TAB);
   LagoonSettings_Command(LAGOON_SETTINGS_ACTIVATE);assert(comfort_camera==0&&comfort_save_failed&&LagoonSettings_Image(&pixels,&width,&height));
   result=file_read(path,&n);assert(!strcmp(result,"[Lagoon]\nSmoothCamera=0\nSmoothCamera=1\n"));free(result);LagoonSettings_Close();
-  puts("PASS Comfort tab: config defaults, no writes from viewing/navigation, one key per deliberate change with BOM/CRLF/comments/unknown keys kept, live camera/CPU-speed handoff once, 60/120/180/240 cycle both ways, held A+direction changes once, duplicate keys refused with session-only warning");
+  puts("PASS Comfort tab: config defaults, no writes from viewing/navigation, one key per deliberate change with BOM/CRLF/comments/unknown keys kept, live camera/CPU-speed/screen-shake handoff once, 60/120/180/240 cycle both ways, held A+direction changes once, duplicate keys refused with session-only warning");
  }
  puts("PASS zoom persistence: exact1/1.25/1.5 token edits, BOM/CRLF/LF/spacing/inline comments/unknown fields, absent key/section insertion, invalid/duplicate/mixed-newline/NUL refusal, concurrent-edit and preexisting-temp protection");
  puts("PASS Quit UI: default Cancel, keyboard/controller selection, held opener/activation and combined-input guards, cancel/tab invalidation, one-shot host request; no save/preference/guest/audio writes");
