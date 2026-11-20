@@ -224,9 +224,9 @@ static void comfort_change(unsigned command){
   comfort_cpu=comfort_cpu>100?100:150;comfort_changed=1;
   comfort_save_failed=!persist_setting("CpuSpeed",comfort_cpu,100,400);
  }else if(comfort_selected==COMFORT_PICTURES){
-  static const unsigned choices[]={60,120,180};unsigned i=0;
-  while(i<3&&choices[i]!=comfort_pictures)i++;if(i==3)i=back?0:2;
-  comfort_pictures=choices[(i+(back?2:1))%3];
+  static const unsigned choices[]={60,120,180,240};unsigned i=0;
+  while(i<4&&choices[i]!=comfort_pictures)i++;if(i==4)i=back?0:3;
+  comfort_pictures=choices[(i+(back?3:1))%4];
   comfort_save_failed=!persist_setting("PicturesPerSecond",comfort_pictures,60,240);
  }else{
   comfort_half=!comfort_half;
@@ -365,7 +365,7 @@ static void comfort_image(void){
  static const char *names[]={"Steady camera","Remove slowdown","Pictures per second","Half pixels"};
  static const char *help[]={"Evens out the camera's stop-and-go on diagonal walks.",
   "More processor time: busy places never chug. Music unchanged.",
-  "More pictures = smoother, less blur. Applies at next start.",
+  "More = smoother, less blur. 240 needs a 240 Hz screen. Next start.",
   "Motion in half-pixel steps (120 or more). Applies at next start."};
  for(unsigned row=0;row<COMFORT_ROWS;row++){
   int y=92+(int)row*48;char value[16];

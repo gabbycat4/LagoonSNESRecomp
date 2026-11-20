@@ -113,3 +113,7 @@ unsigned snes_beam_frame_driver_cpu_speed(void) { return s_test_cpu_speed; }
 void snes_beam_frame_driver_cpu_speed_stats(uint64_t *a, uint64_t *b, uint64_t *c) {
   if (a) *a = 0; if (b) *b = 0; if (c) *c = 0;
 }
+
+void LagoonSceneRenderer_SetDrawThreads(unsigned n) { (void)n; }
+unsigned LagoonSceneRenderer_DrawThreads(void) { return 1; }
+unsigned long long LagoonSceneRenderer_BandPictures(void) { return 0; }

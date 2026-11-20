@@ -66,6 +66,7 @@ static int s_second_core = 1;           /* [Lagoon] SecondCore, LAGOON_SECOND_CO
 static int s_half_pixels = 1;           /* [Lagoon] HalfPixels, LAGOON_HALF_PIXELS */
 static int s_smooth_camera = 1;         /* [Lagoon] SmoothCamera, LAGOON_SMOOTH_CAMERA */
 static unsigned s_cpu_speed = 100;      /* [Lagoon] CpuSpeed, LAGOON_CPU_SPEED (100 = original) */
+static unsigned s_draw_threads = 3;     /* [Lagoon] DrawThreads, LAGOON_DRAW_THREADS (1-4; cores per picture) */
 static volatile unsigned s_cpu_speed_wanted = 100;   /* Comfort menu, applied on the game thread */
 enum { kCamAvg = 16 };
 static double s_camq[kCamAvg][2];
@@ -125,6 +126,7 @@ static unsigned valid_pps(long v) {
 }
 
 static unsigned valid_speed(long v) { return v < 100 ? 100 : v > 400 ? 400 : (unsigned)v; }
+static unsigned valid_threads(long v) { return v < 1 ? 1 : v > 4 ? 4 : (unsigned)v; }
 
 static void read_ini(const char *path) {
   FILE *f = path ? fopen(path, "r") : NULL;
@@ -143,6 +145,7 @@ static void read_ini(const char *path) {
     if (!strcmp(name, "HalfPixels")) s_half_pixels = strtol(value, NULL, 10) != 0;
     if (!strcmp(name, "SmoothCamera")) s_smooth_camera = strtol(value, NULL, 10) != 0;
     if (!strcmp(name, "CpuSpeed")) s_cpu_speed = valid_speed(strtol(value, NULL, 10));
+    if (!strcmp(name, "DrawThreads")) s_draw_threads = valid_threads(strtol(value, NULL, 10));
   }
   fclose(f);
 }
@@ -150,6 +153,8 @@ static void read_ini(const char *path) {
 static void report(void) {
   uint64_t fields = 0, helped = 0, returned = 0;
   snes_beam_frame_driver_cpu_speed_stats(&fields, &helped, &returned);
+  fprintf(stderr, "[lagoon-draw-threads] draw_threads=%u band_pictures=%llu\n",
+          LagoonSceneRenderer_DrawThreads(), LagoonSceneRenderer_BandPictures());
   fprintf(stderr, "[lagoon-cpu-speed] cpu_speed=%u fields=%llu fields_given_time=%llu "
           "clocks_given_per_such_field=%.0f\n", snes_beam_frame_driver_cpu_speed(),
           (unsigned long long)fields, (unsigned long long)helped,
@@ -167,6 +172,7 @@ void LagoonSmooth_AfterConfig(const char *config_path) {
   s_second_core = 1;
   s_half_pixels = 1;
   s_cpu_speed = 100;
+  s_draw_threads = 3;
   read_ini(config_path);
   read_ini("config.local.ini");
   const char *env = getenv("LAGOON_PICTURES");
@@ -179,6 +185,9 @@ void LagoonSmooth_AfterConfig(const char *config_path) {
   if (speed && *speed) s_cpu_speed = valid_speed(strtol(speed, NULL, 10));
   snes_beam_frame_driver_set_cpu_speed(s_cpu_speed);
   s_cpu_speed_wanted = s_cpu_speed;
+  const char *threads = getenv("LAGOON_DRAW_THREADS");
+  if (threads && *threads) s_draw_threads = valid_threads(strtol(threads, NULL, 10));
+  LagoonSceneRenderer_SetDrawThreads(s_draw_threads);
   const char *half = getenv("LAGOON_HALF_PIXELS");
   if (half && *half) s_half_pixels = strtol(half, NULL, 10) != 0;
   if (!once) {
@@ -187,8 +196,8 @@ void LagoonSmooth_AfterConfig(const char *config_path) {
     if (path && *path) {
       s_log = fopen(path, "w");
       if (s_log) {
-        fprintf(s_log, "# settings pictures_per_second=%u second_core=%d half_pixels=%d smooth_camera=%d cpu_speed=%u\n",
-                s_pps, s_second_core, s_half_pixels, s_smooth_camera, s_cpu_speed);
+        fprintf(s_log, "# settings pictures_per_second=%u second_core=%d half_pixels=%d smooth_camera=%d cpu_speed=%u draw_threads=%u\n",
+                s_pps, s_second_core, s_half_pixels, s_smooth_camera, s_cpu_speed, s_draw_threads);
         fprintf(s_log, "# frame alpha t drawn reason (one line per presented picture)\n");
       }
     }
@@ -229,11 +238,19 @@ void LagoonSmooth_LastShift(int *x, int *y) {
   if (y) *y = s_last_shift_y;
 }
 
+/* 240 pictures (Nov 20): 4 x 60.0988 = 240.4 Hz is just ABOVE a 240 Hz panel
+ * (a dropped or torn picture every few seconds). At 240 the game runs at
+ * 59.94 fields/s instead (0.26% slower, not noticeable; the engine's audio
+ * servo absorbs it), so pictures come at 239.76 Hz, just under the panel's
+ * ceiling where adaptive sync still works. Other rates keep the SNES rate. */
+static double field_hz(void) { return s_pps == 240 ? 59.94 : 60.098811862; }
+double LagoonSmooth_SimulationHz(void) { return s_pps == 240 ? field_hz() : 0; }
+
 double LagoonSmooth_PresentationHz(double display_refresh) {
   (void)display_refresh;
   /* An exact multiple of the SNES field rate (180 -> 180.30), so pictures and
    * fields keep the same phase instead of drifting through each other. */
-  return s_pps > 60 ? (double)(s_pps / 60) * 60.098811862 : 0;
+  return s_pps > 60 ? (double)(s_pps / 60) * field_hz() : 0;
 }
 
 static unsigned word(const uint8_t *ram, unsigned a) {

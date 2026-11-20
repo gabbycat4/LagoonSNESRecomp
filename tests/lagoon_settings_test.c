@@ -268,8 +268,10 @@ int main(int argc,char**argv){
   LagoonSettings_Command(LAGOON_SETTINGS_DOWN);LagoonSettings_Command(LAGOON_SETTINGS_RIGHT);assert(comfort_cpu==100);
   assert(LagoonSettings_TakeComfortChange(&cam,&spd)&&cam==0&&spd==100);
   LagoonSettings_Command(LAGOON_SETTINGS_LEFT);assert(comfort_cpu==150);
-  LagoonSettings_Command(LAGOON_SETTINGS_DOWN);LagoonSettings_Command(LAGOON_SETTINGS_RIGHT);assert(comfort_pictures==60);
+  LagoonSettings_Command(LAGOON_SETTINGS_DOWN);LagoonSettings_Command(LAGOON_SETTINGS_RIGHT);assert(comfort_pictures==240);
+  LagoonSettings_Command(LAGOON_SETTINGS_RIGHT);assert(comfort_pictures==60);
   LagoonSettings_Command(LAGOON_SETTINGS_RIGHT);assert(comfort_pictures==120);LagoonSettings_Command(LAGOON_SETTINGS_LEFT);assert(comfort_pictures==60);
+  LagoonSettings_Command(LAGOON_SETTINGS_LEFT);assert(comfort_pictures==240);
   LagoonSettings_Command(LAGOON_SETTINGS_LEFT);assert(comfort_pictures==180);
   LagoonSettings_Command(LAGOON_SETTINGS_DOWN);LagoonSettings_Command(LAGOON_SETTINGS_ACTIVATE);assert(comfort_half==0);
   assert(LagoonSettings_TakeComfortChange(&cam,&spd)&&spd==150);
@@ -283,7 +285,7 @@ int main(int argc,char**argv){
   LagoonSettings_Open();for(unsigned t=0;t<4;t++)LagoonSettings_Command(LAGOON_SETTINGS_NEXT_TAB);
   LagoonSettings_Command(LAGOON_SETTINGS_ACTIVATE);assert(comfort_camera==0&&comfort_save_failed&&LagoonSettings_Image(&pixels,&width,&height));
   result=file_read(path,&n);assert(!strcmp(result,"[Lagoon]\nSmoothCamera=0\nSmoothCamera=1\n"));free(result);LagoonSettings_Close();
-  puts("PASS Comfort tab: config defaults, no writes from viewing/navigation, one key per deliberate change with BOM/CRLF/comments/unknown keys kept, live camera/CPU-speed handoff once, 60/120/180 cycle both ways, held A+direction changes once, duplicate keys refused with session-only warning");
+  puts("PASS Comfort tab: config defaults, no writes from viewing/navigation, one key per deliberate change with BOM/CRLF/comments/unknown keys kept, live camera/CPU-speed handoff once, 60/120/180/240 cycle both ways, held A+direction changes once, duplicate keys refused with session-only warning");
  }
  puts("PASS zoom persistence: exact1/1.25/1.5 token edits, BOM/CRLF/LF/spacing/inline comments/unknown fields, absent key/section insertion, invalid/duplicate/mixed-newline/NUL refusal, concurrent-edit and preexisting-temp protection");
  puts("PASS Quit UI: default Cancel, keyboard/controller selection, held opener/activation and combined-input guards, cancel/tab invalidation, one-shot host request; no save/preference/guest/audio writes");

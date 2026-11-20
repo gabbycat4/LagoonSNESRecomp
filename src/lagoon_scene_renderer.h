@@ -106,4 +106,10 @@ int LagoonSceneRenderer_RenderMotion2x(uint32_t *out, unsigned width, const Lago
 /* 1 while half-pixel pictures are on: the verified render shares their
  * per-field background cache (decoded once a field). */
 void LagoonSceneRenderer_SetMotionCache(int on);
+/* gabbycat4: cores that draw one half-pixel picture together (1 = only the
+ * calling thread; up to 4). Helpers start on first use from the drawing
+ * thread and inherit its CPU set. Pictures are identical for any count. */
+void LagoonSceneRenderer_SetDrawThreads(unsigned threads);
+unsigned LagoonSceneRenderer_DrawThreads(void);
+unsigned long long LagoonSceneRenderer_BandPictures(void);
 #endif

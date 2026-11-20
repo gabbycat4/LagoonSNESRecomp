@@ -617,17 +617,33 @@ void LagoonSceneRenderer_EndFrame(unsigned frame,uint64_t generation,int authori
   s_map_identity_seen=0;
   s_complete=s_build;s_build^=1;s_packets[s_build].valid=0;
 }
+/* gabbycat4 round 12: several cores may draw one picture (bands), so this
+ * memo is filled concurrently. Every writer stores the SAME row for a serial;
+ * the key is published with release after the row and read with acquire, so
+ * a reader that sees the key also sees its row. On x86 these are plain moves. */
+#if defined(__GNUC__) || defined(__clang__)
+#define LSR_KEY_LOAD(p) __atomic_load_n((p),__ATOMIC_ACQUIRE)
+#define LSR_KEY_STORE(p,v) __atomic_store_n((p),(v),__ATOMIC_RELEASE)
+#define LSR_ROW_LOAD(p) __atomic_load_n((p),__ATOMIC_RELAXED)
+#define LSR_ROW_STORE(p,v) __atomic_store_n((p),(v),__ATOMIC_RELAXED)
+#else
+#define LSR_KEY_LOAD(p) (*(p))
+#define LSR_KEY_STORE(p,v) (*(p)=(v))
+#define LSR_ROW_LOAD(p) (*(p))
+#define LSR_ROW_STORE(p,v) (*(p)=(v))
+#endif
 static uint64_t graphics_row_source(const uint16_t *vram,unsigned serial,unsigned tile,unsigned y,unsigned base,unsigned bpp) {
   if(tile&0x8000)y=7-y;
   unsigned adr=(base+(tile&1023)*(bpp==2?8:16)+y)&32767;
   unsigned kind=bpp==4;
-  if(s_plane_keys[kind][adr]!=serial) {
+  if(LSR_KEY_LOAD(&s_plane_keys[kind][adr])!=serial) {
     unsigned planes=vram[adr];
     uint64_t row=s_spread[planes&255]|(s_spread[planes>>8]<<1);
     if(kind){planes=vram[(adr+8)&32767];row|=(s_spread[planes&255]<<2)|(s_spread[planes>>8]<<3);}
-    s_plane_rows[kind][adr]=row;s_plane_keys[kind][adr]=serial;
+    LSR_ROW_STORE(&s_plane_rows[kind][adr],row);LSR_KEY_STORE(&s_plane_keys[kind][adr],serial);
+    return row;
   }
-  return s_plane_rows[kind][adr];
+  return LSR_ROW_LOAD(&s_plane_rows[kind][adr]);
 }
 static uint64_t graphics_row(const ScenePacket *s,unsigned tile,unsigned y,unsigned base,unsigned bpp) {
   return graphics_row_source(s->vram,s->serial,tile,y,base,bpp);
@@ -1053,21 +1069,28 @@ int LagoonSceneRenderer_Motion(LagoonSceneMotion *m){
  * on the 2x grid with their own half-pixel offsets; the BG3 HUD stays fixed.
  * Same priority rules and order as render_into (sprites over BG by priority,
  * BG3 over both, finite-room blanking). Never used for mosaic packets. */
-static void render_into_2x(const ScenePacket *s,unsigned width,uint32_t *out,const LagoonSceneMotion *pos) {
+/* gabbycat4 round 12: one band of output rows [Y0,Y1). Each row depends only
+ * on Y and read-only data (the placed packet, the background cache), so bands
+ * can be drawn on different cores; each band has its own scratch. */
+typedef struct BandScratch {
+  uint8_t bdepth[W+8];uint16_t bcol[W+8];
+  uint64_t rank[2*W];uint16_t obj[2*W];uint8_t prio[2*W];
+  uint8_t hud_z[256],blank[W+8];uint16_t hud_c[256];
+} BandScratch;
+enum { BAND_MAX = 4 };
+static BandScratch s_band_scratch[BAND_MAX];
+static void render_band_2x(const ScenePacket *s,unsigned width,uint32_t *out,const LagoonSceneMotion *pos,
+                           int use_cache,unsigned Y0,unsigned Y1,BandScratch *b) {
   int left=(int)(width-256)/2;
   unsigned W2=width*2;
   int hbx=pos->half_bg&1,hby=(pos->half_bg>>1)&1;
-  static uint8_t bdepth[W+8];static uint16_t bcol[W+8];
-  static uint64_t rank[2*W];static uint16_t obj[2*W];static uint8_t prio[2*W];
-  static uint8_t hud_z[256],blank[W+8];static uint16_t hud_c[256];
+  uint8_t *bdepth=b->bdepth;uint16_t *bcol=b->bcol;
+  uint64_t *rank=b->rank;uint16_t *obj=b->obj;uint8_t *prio=b->prio;
+  uint8_t *hud_z=b->hud_z,*blank=b->blank;uint16_t *hud_c=b->hud_c;
   int cached=-1,hud_cached=-1,out_cached=-1;
   /* camera offset of this picture against the cached backgrounds */
   int cx=s->wx-s_bgc.ref_x,cy=s->wy-s_bgc.ref_y;
-  int use_cache=!s->parallax&&s_motion_render==1&&s_bgc.valid&&s_bgc.serial==s->serial&&s_bgc.generation==s->generation&&
-    s_bgc.width==width&&s_bgc.bg2_x==(int)s->bg2_x&&s_bgc.bg2_y==(int)s->bg2_y&&
-    cx>=-BGC_M&&cx<=BGC_M&&cy>=-BGC_M&&cy<=BGC_M;
-  if(use_cache)++s_bgc_hits;
-  for(unsigned Y=0;Y<2*H;++Y) {
+  for(unsigned Y=Y0;Y<Y1;++Y) {
     int y=((int)Y+hby)>>1;               /* source background row */
     const uint8_t *bd=bdepth;const uint16_t *bc=bcol;
     if(use_cache) {
@@ -1151,6 +1174,77 @@ static void render_into_2x(const ScenePacket *s,unsigned width,uint32_t *out,con
       row[X]=s_rgb15[color&32767];
     }
   }
+}
+
+/* Helper threads for the bands (POSIX). Started by the first threaded picture
+ * on the thread that draws (the main thread, already pinned), so on Linux they
+ * inherit its CPU set: the same L3 group, where the packet and the background
+ * cache already sit. The caller draws band 0 and waits for the others. */
+static unsigned s_draw_threads=1;
+static unsigned long long s_band_pictures;
+void LagoonSceneRenderer_SetDrawThreads(unsigned n){s_draw_threads=n<1?1:n>BAND_MAX?BAND_MAX:n;}
+unsigned LagoonSceneRenderer_DrawThreads(void){return s_draw_threads;}
+unsigned long long LagoonSceneRenderer_BandPictures(void){return s_band_pictures;}
+#if !defined(_WIN32)
+#include <pthread.h>
+#include <stdint.h>
+static pthread_mutex_t s_band_lock=PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t s_band_go=PTHREAD_COND_INITIALIZER,s_band_done=PTHREAD_COND_INITIALIZER;
+static unsigned s_band_generation,s_band_left,s_band_helpers;
+static struct {const ScenePacket *s;unsigned width;uint32_t *out;const LagoonSceneMotion *pos;int use_cache;unsigned bands;} s_band_job;
+static void *band_helper(void *arg){
+  unsigned index=(unsigned)(uintptr_t)arg,seen=0;
+  pthread_mutex_lock(&s_band_lock);
+  for(;;){
+    while(s_band_generation==seen)pthread_cond_wait(&s_band_go,&s_band_lock);
+    seen=s_band_generation;
+    unsigned bands=s_band_job.bands;
+    if(index>=bands)continue;
+    const ScenePacket *s=s_band_job.s;unsigned width=s_band_job.width;uint32_t *out=s_band_job.out;
+    const LagoonSceneMotion *pos=s_band_job.pos;int use_cache=s_band_job.use_cache;
+    pthread_mutex_unlock(&s_band_lock);
+    render_band_2x(s,width,out,pos,use_cache,2*H*index/bands,2*H*(index+1)/bands,&s_band_scratch[index]);
+    pthread_mutex_lock(&s_band_lock);
+    if(--s_band_left==0)pthread_cond_signal(&s_band_done);
+  }
+  return NULL;
+}
+static unsigned band_helpers_ready(unsigned want){
+  while(s_band_helpers<want){
+    pthread_t t;pthread_attr_t a;pthread_attr_init(&a);pthread_attr_setdetachstate(&a,PTHREAD_CREATE_DETACHED);
+    int ok=pthread_create(&t,&a,band_helper,(void *)(uintptr_t)(s_band_helpers+1))==0;
+    pthread_attr_destroy(&a);if(!ok)break;
+    ++s_band_helpers;
+  }
+  return s_band_helpers;
+}
+#endif
+
+static void render_into_2x(const ScenePacket *s,unsigned width,uint32_t *out,const LagoonSceneMotion *pos) {
+  int cx=s->wx-s_bgc.ref_x,cy=s->wy-s_bgc.ref_y;
+  int use_cache=!s->parallax&&s_motion_render==1&&s_bgc.valid&&s_bgc.serial==s->serial&&s_bgc.generation==s->generation&&
+    s_bgc.width==width&&s_bgc.bg2_x==(int)s->bg2_x&&s_bgc.bg2_y==(int)s->bg2_y&&
+    cx>=-BGC_M&&cx<=BGC_M&&cy>=-BGC_M&&cy<=BGC_M;
+  if(use_cache)++s_bgc_hits;
+  unsigned bands=1;
+#if !defined(_WIN32)
+  if(s_draw_threads>1)bands=1+band_helpers_ready(s_draw_threads-1);
+  if(bands>1){
+    pthread_mutex_lock(&s_band_lock);
+    s_band_job.s=s;s_band_job.width=width;s_band_job.out=out;s_band_job.pos=pos;
+    s_band_job.use_cache=use_cache;s_band_job.bands=bands;
+    s_band_left=bands-1;++s_band_generation;
+    pthread_cond_broadcast(&s_band_go);
+    pthread_mutex_unlock(&s_band_lock);
+    render_band_2x(s,width,out,pos,use_cache,0,2*H/bands,&s_band_scratch[0]);
+    pthread_mutex_lock(&s_band_lock);
+    while(s_band_left)pthread_cond_wait(&s_band_done,&s_band_lock);
+    pthread_mutex_unlock(&s_band_lock);
+    ++s_band_pictures;
+    return;
+  }
+#endif
+  render_band_2x(s,width,out,pos,use_cache,0,2*H,&s_band_scratch[0]);
 }
 int LagoonSceneRenderer_RenderMotion(uint32_t *out,unsigned width,const LagoonSceneMotion *pos){
   ScenePacket *s=&s_packets[s_complete];

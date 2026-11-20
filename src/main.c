@@ -658,6 +658,7 @@ static const SnesDesktopHostGame kGameHost = {
     .emulation_thread    = LagoonSmooth_SecondCore,
     .draw_inbetween      = LagoonHost_DrawInbetween,
     .pin_thread          = LagoonAffinity_Pin,
+    .simulation_hz_after_config = LagoonSmooth_SimulationHz,   /* gabbycat4: 59.94 at 240 pictures */
 #ifdef _WIN32
     .create_renderer = LagoonD3D11_Create,
     .renderer_title_ui = LagoonD3D11_TitleUi,

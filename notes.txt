@@ -640,3 +640,46 @@ Round 10 (Nov 20): cave monsters looked blurry (phone video monsterslagoon.mp4; 
   jumps > 0.5 px 1433 -> 1017. Reversals rose (monster 8 50 -> 119): they are the game's own turns
   (x 538 53a 538 536), now counted because the pieces are owned. Sessions 7 and 9: town identical,
   guards identical; t8 PASS; compile clean.
+
+Round 11 (Nov 20): 240 pictures per second (user: monsters "so perfect" after round 10; committed).
+- 4 x 60.0988 = 240.4 Hz is above a 240 Hz panel. At 240 the game now runs at 59.94 fields/s
+  (0.26% slower than the SNES; inaudible: the engine's audio servo bends playback up to +/-0.5%,
+  and 534 natives x 59.94 = 32,008/s is closer to the 32,040 nominal than 60.0988 already is), so
+  pictures come at 239.76 Hz, just under the panel's ceiling (adaptive sync keeps working there).
+- Engine hook (patch): SnesDesktopHostGame.simulation_hz_after_config, called right after
+  after_config; a positive value replaces g_simulation_hz (it is set before the config is read).
+  Lagoon: LagoonSmooth_SimulationHz() = 59.94 at 240, else 0 (SNES rate); PresentationHz uses the
+  same field rate. 180/120 unchanged.
+- Comfort tab: Pictures per second 60/120/180/240 (240 needs a 240 Hz screen; next start).
+- Expected motion at 240 (half pixels): monsters/chicken (2 px/step) 1,0,1,0 = even; Nasir and the
+  camera (3 px/step) 1,1,1,0 = uneven. At 180 it is the other way round. The user decides by eye.
+- patches: combined sections replaced for host_main.c/.h (+ the 8 CPU-speed files), reverse-check
+  passes, fresh apply == tree, apply_framework_patch.py "already applied". gabbycat4-smooth.patch
+  REBUILT from the upstream-patched tree (BASE + lagoon-framework.upstream.patch) for all 10 files;
+  applying it to that tree reproduces ours byte for byte.
+- settings test PASS (240 in the cycle); main.c, lagoon_smooth.c, lagoon_settings.c, host_main.c
+  compile with the real flags.
+
+Round 12 (Nov 20): pictures drawn by several cores ("bands").
+- 240 run (round 11, 259 s): 168 fields with only 3 of 4 pictures (~1 skipped picture every 1.5 s
+  = the user's "stutter every once in a while"). 92 of 97 checked came right after a slow compose
+  (> 3 ms; mean 1.1-1.5 ms; 15% of fields had one, in clusters/busy scenes). Budget per picture
+  4.17 ms at 240 vs 5.55 at 180. Not the once-a-second self-check (no 60-field period).
+- render_into_2x (lagoon_scene_renderer.c) is a row loop; every output row depends only on Y and
+  read-only data (the placed packet, the background cache). Now render_band_2x(Y0,Y1) with its own
+  scratch (the old static row buffers), and up to 3 POSIX helper threads draw the other bands
+  while the caller draws band 0 and waits (mutex + 2 condvars, a job generation counter).
+  Helpers are created lazily by the drawing (main) thread, so on Linux they inherit its pinned
+  CPU set (same L3 group as the packet/cache). Windows: single-threaded as before.
+- The tile-row memo (graphics_row_source) is filled concurrently: same value from every writer,
+  key published with release after the row, read with acquire (plain moves on x86).
+- [Lagoon] DrawThreads (1-4, default 3 = main + 2 helpers), env LAGOON_DRAW_THREADS. smooth.log
+  settings line has draw_threads; exit report: [lagoon-draw-threads] band_pictures=N.
+- tools/smooth-tests/tbands.c: 60 random scenes, random half offsets, cache on/off, parallax:
+  2/3/4 cores == 1 core pixel for pixel (PASS). Claude's VM (2 CPUs): 3.0 -> 1.4 ms per picture.
+  t2x/t2h/t2v/t1c, t8, replay unchanged; both files compile with the real flags; build has -pthread.
+Round 12 result (Nov 20, 240, 3 drawing cores, 176 s): user "I don't think I hit a single hitch".
+Fields with a skipped picture 59 (0.34/s; round 11: 168 in 259 s = 0.65/s), none near room changes,
+some clusters (busy spots). compose mean 1.12 -> 0.90 ms, 99th 3.46 ms, max 7.58 ms;
+band pictures 34,265; self-checks 159 ok / 0 failed. Next if wanted: DrawThreads=4 A/B, or draw
+the next picture ahead (the per-field base compose + raster capture still sit on the main thread).

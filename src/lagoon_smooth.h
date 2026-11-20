@@ -28,6 +28,9 @@ void LagoonSmooth_Reset(void);
 void LagoonSmooth_SetSmoothCamera(int on);
 void LagoonSmooth_SetCpuSpeed(unsigned percent);
 unsigned LagoonSmooth_PicturesPerSecond(void);
+/* Field rate the host should run the game at (0 = the SNES rate). 59.94 at
+ * 240 pictures, so 4 pictures per field fit a 240 Hz panel. */
+double LagoonSmooth_SimulationHz(void);
 /* after_run_frame: record the game tick, camera and actor table ($0408,
  * $0480/$0482, $0500..) for the field that just ran. */
 void LagoonSmooth_AfterFrame(unsigned frame, const uint8_t *ram);
