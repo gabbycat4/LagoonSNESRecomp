@@ -100,6 +100,12 @@ static uint8_t s_period_hist[8];
 static unsigned s_period_pos;
 static int s_step_real;   /* s_step_frame is a real step (not a scene start) */
 static int8_t s_owner[128];
+/* Palettes each character's pieces use (round 7c), learned from pieces whose
+ * owner was decided by movement. Nasir uses palettes 0/1, the guards 3, town
+ * people 2...; when two characters overlap, a piece goes to the one whose
+ * palette it has. */
+static uint32_t s_pal_n[kActors][8];
+static uint8_t s_pal_type[kActors];
 static int16_t s_obj_owner[LAGOON_SCENE_MOTION_OBJECTS];
 static uint32_t s_buf[kMaxWidth * kHeight];
 static FILE *s_log;
@@ -130,9 +136,10 @@ static void read_ini(const char *path) {
 }
 
 static void report(void) {
-  fprintf(stderr, "[lagoon-smooth] pictures_per_second=%u steps=%llu checks_ok=%llu checks_failed=%llu "
+  fprintf(stderr, "[lagoon-smooth] pictures_per_second=%u second_core=%d half_pixels=%d smooth_camera=%d "
+          "steps=%llu checks_ok=%llu checks_failed=%llu "
           "inbetween_pictures=%llu renders=%llu pieces_with_character=%llu pieces_alone=%llu\n",
-          s_pps, s_steps, s_checks_ok, s_checks_failed, s_drawn, s_renders, s_owned, s_free);
+          s_pps, s_second_core, s_half_pixels, s_smooth_camera, s_steps, s_checks_ok, s_checks_failed, s_drawn, s_renders, s_owned, s_free);
   if (s_log) fclose(s_log);
 }
 
@@ -156,7 +163,11 @@ void LagoonSmooth_AfterConfig(const char *config_path) {
     const char *path = getenv("LAGOON_SMOOTH_LOG");
     if (path && *path) {
       s_log = fopen(path, "w");
-      if (s_log) fprintf(s_log, "# frame alpha t drawn reason (one line per presented picture)\n");
+      if (s_log) {
+        fprintf(s_log, "# settings pictures_per_second=%u second_core=%d half_pixels=%d smooth_camera=%d\n",
+                s_pps, s_second_core, s_half_pixels, s_smooth_camera);
+        fprintf(s_log, "# frame alpha t drawn reason (one line per presented picture)\n");
+      }
     }
     atexit(report);
   }
@@ -172,6 +183,8 @@ void LagoonSmooth_Reset(void) {
   s_period = 2;
   memset(s_period_hist, 0, sizeof s_period_hist);
   memset(s_ring, 0, sizeof s_ring);
+  memset(s_pal_n, 0, sizeof s_pal_n);
+  memset(s_pal_type, 0, sizeof s_pal_type);
 }
 
 unsigned LagoonSmooth_PicturesPerSecond(void) { return s_pps; }
@@ -289,7 +302,34 @@ static int outside(unsigned k, int dx, int dy) {
  * (same picture). It wins ties: in the field before a step nobody has moved
  * yet, so movement cannot tell a walking Nasir from the guard he passes.
  * Movement that disagrees by a pixel (1000 points) still overrides it. */
-static int owner_of(int x, int y, int have_motion, int odx, int ody, int *by_motion, int prefer) {
+/* A character that has shown at least 24 pieces and used this palette for
+ * fewer than 1 in 20 of them is the wrong owner: +5000 (more than five pixels
+ * of disagreeing movement). Only a penalty, so a character that is the only
+ * candidate (Nasir flashing after a hit) keeps its pieces. */
+static int palette_penalty(unsigned k, int pal) {
+  uint32_t total = 0;
+  for (int p = 0; p < 8; ++p) total += s_pal_n[k][p];
+  return total >= 24 && s_pal_n[k][pal & 7] * 20 < total ? 5000 : 0;
+}
+
+static void learn_palettes(const uint8_t *sure) {
+  for (unsigned k = 0; k < kActors; ++k) {
+    uint8_t want = ref_live(k) ? (uint8_t)(s_spr.type[k] + 1) : 0;
+    if (k == 0 && want) want = 1;   /* Nasir is Nasir whatever his slot type says */
+    if (want != s_pal_type[k]) { memset(s_pal_n[k], 0, sizeof s_pal_n[k]); s_pal_type[k] = want; }
+  }
+  for (unsigned i = 0; i < 128; ++i) {
+    int k = s_owner[i];
+    if (!s_pkt.visible[i] || !sure[i] || k < 0) continue;
+    uint32_t *n = s_pal_n[k];
+    ++n[(s_pkt.tile[i] >> 9) & 7];
+    uint32_t total = 0;
+    for (int p = 0; p < 8; ++p) total += n[p];
+    if (total > 4096) for (int p = 0; p < 8; ++p) n[p] /= 2;
+  }
+}
+
+static int owner_of(int x, int y, int pal, int have_motion, int odx, int ody, int *by_motion, int prefer) {
   int best = kOwnerNone, best_score = 1 << 30;
   *by_motion = 0;
   for (unsigned k = 0; k < kActors; ++k) {
@@ -308,6 +348,7 @@ static int owner_of(int x, int y, int have_motion, int odx, int ody, int *by_mot
       score += 1000 * (int)lround(fabs(odx - pdx) + fabs(ody - pdy));
     }
     if ((int)k == prefer) score -= 500;
+    score += palette_penalty(k, pal);
     if (score < best_score) { best_score = score; best = (int)k; }
   }
   /* Scenery: a piece that kept its picture and stayed put in the world (a
@@ -369,7 +410,7 @@ static void assign_owners(void) {
     }
     int by_motion;
     int prefer = s_have_last && s_last.visible[i] && s_last.tile[i] == s_pkt.tile[i] ? prev[i] : kOwnerNone;
-    s_owner[i] = (int8_t)owner_of(x, y, same, same ? x - s_pkt_from.ox[i] : 0,
+    s_owner[i] = (int8_t)owner_of(x, y, (s_pkt.tile[i] >> 9) & 7, same, same ? x - s_pkt_from.ox[i] : 0,
                                   same ? y - sy(s_pkt_from.oy[i]) : 0, &by_motion, prefer);
     sure[i] = (uint8_t)by_motion;
   }
@@ -383,9 +424,11 @@ static void assign_owners(void) {
       int a = (int)i - d, b = (int)i + d, k = kOwnerNone;
       if (a >= 0 && sure[a] && s_owner[a] >= 0 && in_box(s_owner[a], x, y)) k = s_owner[a];
       else if (b < 128 && sure[b] && s_owner[b] >= 0 && in_box(s_owner[b], x, y)) k = s_owner[b];
+      if (k != kOwnerNone && palette_penalty((unsigned)k, (s_pkt.tile[i] >> 9) & 7)) k = kOwnerNone;
       if (k != kOwnerNone) { s_owner[i] = (int8_t)k; break; }
     }
   }
+  learn_palettes(sure);
   for (unsigned i = 0; i < s_pkt.count; ++i)
     s_obj_owner[i] = (int16_t)obj_owner_of(s_pkt.objx[i], s_pkt.objy[i]);
   s_last = s_pkt; memcpy(s_last_owner, s_owner, sizeof s_last_owner); s_have_last = 1;

@@ -518,3 +518,32 @@ whole scene glided-stopped-glided; the big still things (gate guards, house door
 - [Lagoon] SmoothCamera=1 (default), LAGOON_SMOOTH_CAMERA=0 for the game's own camera.
 - Session 6 town camera per field: 3 3 0 0 3 3 0 0 -> 1 1 2 3 2 2 1 2 1 2; sudden full<->stop
   jumps 23 -> 0; sessions 3-5: 0 -> 0. t8, t2x/t2h/t2v/t1c PASS; compile clean.
+
+Round 7b (Nov 20): build-port/config.ini had SmoothCamera = 0 (changed 07:03 Nov 19, before the
+last session), so round 7's steady camera was OFF in the session after it. Set back to 1. smooth.log
+now starts with "# settings ..." and the exit report on stderr prints second_core / half_pixels /
+smooth_camera, so every log says which options were on. Compile clean with the real flags.
+Next: re-test guards/doors with it on; then a Comfort menu (pictures/s, half pixels, steady camera,
+screen shake off), slowdown removal as its own option, 240 Hz (run at exactly 60.0 fields/s).
+
+Round 7c (Nov 20): guards jump when Nasir walks next to/in front of them.
+- Session 7 (steady camera ON, confirmed by the new settings line). Phone video (lagoonguards.mp4,
+  30 fps): the right guard's helmet tracks steady against the stairs (within 1 phone px) except
+  frames 113-115, exactly when Nasir overlaps him: ~1 game pixel sideways for one phone frame,
+  smeared. Doors video: door parts never jump against the window at 30 fps, but frame 71 shows
+  the door's right edge/handle split while Nasir passes (phone rolling shutter can also do this).
+- Measured with a replay probe of lagoon_smooth's own owners (s_owner) by sprite PALETTE:
+  Nasir's pieces are palettes 0/1, the guards' 3, town people 2. Session 7: guard pieces given to
+  Nasir 126 pictures, Nasir pieces given to a guard 390, town other-palette pieces given to Nasir 90,
+  Nasir's to others 36. Each swap lasts 1-2 fields = the guard/Nasir parts riding the wrong
+  character = the jump.
+- Fix: each character learns its palettes from pieces decided by movement (reset when the slot's
+  type changes or on a new scene); a candidate whose palette share is < 1/20 (after >= 24 pieces)
+  gets +5000 (more than 5 px of disagreeing movement). Only a penalty: a lone candidate keeps the
+  piece (Nasir flashing after a hit). The neighbour-slot rule also refuses a wrong-palette owner.
+- Session 7 after: all four swap counts 0. Reversals: other characters 141 -> 121, Nasir 5898 ->
+  5899, no character 90 -> 90; town 3623 -> 3610, cave/guards 2266 -> 2260. Replay "split" counts
+  +3-4% (its own box estimate disagrees with the palette choice; not a picture measure).
+- t8, t2x/t2h/t2v/t1c PASS; compile clean with the real flags. Before-copy: /tmp only.
+- Doors: still open. Next if they still judder: log the background source near doors (VRAM window
+  vs room map) and A/B with KDE "Allow tearing in fullscreen" off.

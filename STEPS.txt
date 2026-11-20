@@ -1,4 +1,4 @@
-# Lagoon Step 5, round 7: steady camera (no stop-go on diagonal walks)
+# Lagoon Step 5, round 7c: guards keep their own pieces when Nasir walks past
 # Every line is a fish comment or a command, so a whole block can be pasted.
 # Logs land in build-port/. Tell Claude "done" after each run.
 
@@ -7,17 +7,15 @@ cd ~/Projects/LagoonSNESRecomp
 cmake --build build-port --target LagoonSNESRecomp 2>&1 | tail -5
 # If the last lines say "error", send them to Claude instead of running.
 
-# --- 2. Play (half pixels are on by default with the second core) ---
-# Continue your save. Walk DIAGONALLY past the two gate guards and along the house doors
-# (that is where the camera went stop-go). Then anywhere else you like.
-# To compare with the game's own camera, add LAGOON_SMOOTH_CAMERA=0 after env.
-# Also check: the HUD, the key icon, the boss bar if you reach one, the menu, fades.
+# --- 2. Play with MangoHud (paste this whole block) ---
+# Walk past and IN FRONT OF the two guards by the stairs (overlap them), then past the
+# house doors in town like in your videos. Quit the game normally when done.
 cd ~/Projects/LagoonSNESRecomp
 env LAGOON_SMOOTH_LOG=smooth.log LAGOON_MOTION_LOG=motion.log LAGOON_OAM_LOG=oam.log SNESRECOMP_FRAME_TIMING=timing.csv SNESRECOMP_HOST_PROFILE=1 mangohud ./build-port/LagoonSNESRecomp --no-launcher --rom lagoon.sfc 2> profile.txt
 
-# --- 3. Tell Claude "done": water edge, NPCs, town hitches, anything doubled or shaking. ---
+# --- 3. Tell Claude "done": guards better/same/worse? doors? (videos welcome again) ---
 
 # --- 4. Commit when it feels at least as good as before ---
 cd ~/Projects/LagoonSNESRecomp
 git --no-optional-locks add src/lagoon_smooth.c notes.txt STEPS.txt
-git --no-optional-locks commit -m "Steady camera: view averaged over two game steps (no stop-go on diagonal walks)"
+git --no-optional-locks commit -m "Sprite owners by palette (guards keep their pieces when Nasir overlaps); log which smooth settings are on"
