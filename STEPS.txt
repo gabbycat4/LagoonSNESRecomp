@@ -1,4 +1,4 @@
-# Lagoon round 9: Comfort tab in the in-game Options menu
+# Lagoon round 10: cave monsters drawn one field late (like Nasir) -> no more stop-go blur
 # Every line is a fish comment or a command, so a whole block can be pasted.
 # Tell Claude "done" after the run.
 
@@ -7,17 +7,14 @@ cd ~/Projects/LagoonSNESRecomp
 cmake --build build-port --target LagoonSNESRecomp 2>&1 | tail -5
 # If the last lines say "error", send them to Claude instead of running.
 
-# --- 2. Play (your config already has 180 pictures and CpuSpeed 150) ---
-# Open the Options menu the usual way, press R (or PageDown) to the new "Comfort" tab.
-# Try: Steady camera Off/On and Remove slowdown Off/On while walking in town (they change live).
-# Pictures per second / Half pixels only change the next time you start the game.
-# Put everything back the way you like it before quitting (it is saved for you).
+# --- 2. Play in the same cave with the monsters (sprite log on, so Claude can check) ---
+# Walk near the monsters for a minute, also fight one. Then a quick look in town.
 cd ~/Projects/LagoonSNESRecomp
-env LAGOON_SMOOTH_LOG=smooth.log LAGOON_MOTION_LOG=motion.log SNESRECOMP_FRAME_TIMING=timing.csv mangohud ./build-port/LagoonSNESRecomp --no-launcher --rom lagoon.sfc 2> profile.txt
+env LAGOON_SMOOTH_LOG=smooth.log LAGOON_MOTION_LOG=motion.log LAGOON_OAM_LOG=oam.log mangohud ./build-port/LagoonSNESRecomp --no-launcher --rom lagoon.sfc 2> profile.txt
 
-# --- 3. Tell Claude "done": does the tab look right, do the live options switch cleanly? ---
+# --- 3. Tell Claude "done": monsters less blurry? anything new that shakes? ---
 
 # --- 4. Commit when happy ---
 cd ~/Projects/LagoonSNESRecomp
-git --no-optional-locks add src/lagoon_settings.c src/lagoon_settings.h src/lagoon_smooth.c src/lagoon_smooth.h src/main.c tests/lagoon_settings_test.c notes.txt STEPS.txt
-git --no-optional-locks commit -m "Comfort tab in Options: steady camera, remove slowdown (live), pictures per second, half pixels"
+git --no-optional-locks add src/lagoon_smooth.c notes.txt STEPS.txt
+git --no-optional-locks commit -m "Characters learn whether their sprites are one field late (cave monsters glide instead of stop-go)"

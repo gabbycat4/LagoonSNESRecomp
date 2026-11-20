@@ -113,6 +113,8 @@ static int8_t s_owner[128];
  * palette it has. */
 static uint32_t s_pal_n[kActors][8];
 static uint8_t s_pal_type[kActors];
+static uint8_t s_late[kActors];           /* round 10: sprites built one field late */
+static uint16_t s_late_n[kActors][2];     /* [0] on time, [1] one field late */
 static int16_t s_obj_owner[LAGOON_SCENE_MOTION_OBJECTS];
 static uint32_t s_buf[kMaxWidth * kHeight];
 static FILE *s_log;
@@ -205,6 +207,8 @@ void LagoonSmooth_Reset(void) {
   memset(s_period_hist, 0, sizeof s_period_hist);
   memset(s_ring, 0, sizeof s_ring);
   memset(s_pal_n, 0, sizeof s_pal_n);
+  memset(s_late, 0, sizeof s_late);
+  memset(s_late_n, 0, sizeof s_late_n);
   memset(s_pal_type, 0, sizeof s_pal_type);
 }
 
@@ -309,11 +313,20 @@ enum { kSlack = 16 };
  * effects, the few characters drawn there -- follows THIS field's scroll.
  * Round 6 used Nasir's rule for everything: town and cave pieces reversed
  * direction 5-10x more often (shaking doors, NPCs, priest, enemies). */
-static int ref_ax(unsigned k) { return k == 0 ? s_spr.ax[k] : s_ref_rec.ax[k]; }
-static int ref_ay(unsigned k) { return k == 0 ? s_spr.ay[k] : s_ref_rec.ay[k]; }
-static int ref_ox(unsigned k) { return k == 0 ? s_spr_ox : s_ref_wx; }
-static int ref_oy(unsigned k) { return k == 0 ? s_spr_oy : s_ref_wy; }
-static int ref_live(unsigned k) { return s_rec_to.live[k] && (k == 0 ? s_spr.live[k] : s_ref_rec.live[k]); }
+/* Round 10 (Nov 20): not only Nasir. The cave monsters' sprites are ALSO
+ * built from the previous field's position (measured: type 2 pieces fit the
+ * previous field's actor 66% vs 21-34% for this field's). Treated as on time,
+ * each step looked like "the pieces stood still while the monster moved", so
+ * they went to nobody for that field: freeze a field, catch up, freeze...
+ * (blurry, stop-go monsters). Each character now LEARNS its timing: when it
+ * moves on one field and not the other, do its pieces move with this field's
+ * motion or the previous field's? Nasir is always late. */
+static int late(unsigned k) { return k == 0 || s_late[k]; }
+static int ref_ax(unsigned k) { return late(k) ? s_spr.ax[k] : s_ref_rec.ax[k]; }
+static int ref_ay(unsigned k) { return late(k) ? s_spr.ay[k] : s_ref_rec.ay[k]; }
+static int ref_ox(unsigned k) { return late(k) ? s_spr_ox : s_ref_wx; }
+static int ref_oy(unsigned k) { return late(k) ? s_spr_oy : s_ref_wy; }
+static int ref_live(unsigned k) { return s_rec_to.live[k] && (late(k) ? s_spr.live[k] : s_ref_rec.live[k]); }
 static void extent(unsigned k, int *x0, int *x1, int *y0, int *y1) {
   uint8_t t = s_spr.type[k];
   if (k == 0) { *x0 = -27; *x1 = 13; *y0 = -35; *y1 = 0; }
@@ -345,7 +358,10 @@ static void learn_palettes(const uint8_t *sure) {
   for (unsigned k = 0; k < kActors; ++k) {
     uint8_t want = ref_live(k) ? (uint8_t)(s_spr.type[k] + 1) : 0;
     if (k == 0 && want) want = 1;   /* Nasir is Nasir whatever his slot type says */
-    if (want != s_pal_type[k]) { memset(s_pal_n[k], 0, sizeof s_pal_n[k]); s_pal_type[k] = want; }
+    if (want != s_pal_type[k]) {
+      memset(s_pal_n[k], 0, sizeof s_pal_n[k]); s_pal_type[k] = want;
+      s_late_n[k][0] = s_late_n[k][1] = 0; s_late[k] = 0;
+    }
   }
   for (unsigned i = 0; i < 128; ++i) {
     int k = s_owner[i];
@@ -370,10 +386,10 @@ static int owner_of(int x, int y, int pal, int have_motion, int odx, int ody, in
     extent(k, &x0, &x1, &y0, &y1);
     int score = 200 * out + abs(2 * (x - sx) - x0 - x1) / 2 + abs(2 * (y - sy0) - y0 - y1) / 2;
     if (have_motion) {
-      double pdx = k == 0 ? (s_spr.ax[k] - s_spr_from.ax[k]) - (s_spr_ox - s_spr_from_ox)
-                          : (s_to.ax[k] - s_from.ax[k]) - (s_ref_wx - s_ref_from_wx);
-      double pdy = k == 0 ? (s_spr.ay[k] - s_spr_from.ay[k]) - (s_spr_oy - s_spr_from_oy)
-                          : (s_to.ay[k] - s_from.ay[k]) - (s_ref_wy - s_ref_from_wy);
+      double pdx = late(k) ? (s_spr.ax[k] - s_spr_from.ax[k]) - (s_spr_ox - s_spr_from_ox)
+                           : (s_to.ax[k] - s_from.ax[k]) - (s_ref_wx - s_ref_from_wx);
+      double pdy = late(k) ? (s_spr.ay[k] - s_spr_from.ay[k]) - (s_spr_oy - s_spr_from_oy)
+                           : (s_to.ay[k] - s_from.ay[k]) - (s_ref_wy - s_ref_from_wy);
       score += 1000 * (int)lround(fabs(odx - pdx) + fabs(ody - pdy));
     }
     if ((int)k == prefer) score -= 500;
@@ -418,7 +434,38 @@ static int in_box(int k, int x, int y) {
   return outside((unsigned)k, x - (ref_ax(k) - ref_ox(k)), y - (ref_ay(k) - ref_oy(k))) <= 4;
 }
 
+/* Timing evidence from pieces that belonged to character k in the previous
+ * packet (same list slot, same picture). Only fields where k moved on exactly
+ * one of the last two fields can tell the rules apart. */
+static void learn_timing(void) {
+  if (!s_have_last || s_last.frame + 1 != s_pkt.frame) return;
+  const Record *r0 = record_for(s_pkt.frame), *r1 = record_for(s_pkt.frame - 1), *r2 = record_for(s_pkt.frame - 2);
+  if (!r0 || !r1 || !r2) return;
+  uint8_t seen[kActors] = {0};
+  for (unsigned i = 0; i < 128; ++i) {
+    int k = s_last_owner[i];
+    if (k <= 0 || seen[k] || !s_pkt.visible[i] || !s_last.visible[i] || s_last.tile[i] != s_pkt.tile[i]) continue;
+    if (!r0->live[k] || !r1->live[k] || !r2->live[k]) continue;
+    int a0x = r0->ax[k] - r1->ax[k], a0y = r0->ay[k] - r1->ay[k];   /* moved this field */
+    int a1x = r1->ax[k] - r2->ax[k], a1y = r1->ay[k] - r2->ay[k];   /* moved last field */
+    if ((a0x == a1x && a0y == a1y) || abs(a0x) > kMaxStep || abs(a0y) > kMaxStep ||
+        abs(a1x) > kMaxStep || abs(a1y) > kMaxStep) continue;
+    int px = (s_pkt.ox[i] + s_pkt.wx) - (s_last.ox[i] + s_last.wx);
+    int py = (sy(s_pkt.oy[i]) + s_pkt.wy) - (sy(s_last.oy[i]) + s_last.wy);
+    int which = px == a0x && py == a0y ? 0 : px == a1x && py == a1y ? 1 : -1;
+    if (which < 0) continue;
+    seen[k] = 1;
+    uint16_t *n = s_late_n[k];
+    if (++n[which] > 64) { n[0] /= 2; n[1] /= 2; }
+    /* Switch only on clear evidence (3+ and twice the other), so a stray
+     * field never flips a character. */
+    if (!s_late[k] && n[1] >= 3 && n[1] >= 2 * n[0]) s_late[k] = 1;
+    else if (s_late[k] && n[0] >= 3 && n[0] >= 2 * n[1]) s_late[k] = 0;
+  }
+}
+
 static void assign_owners(void) {
+  learn_timing();
   uint8_t sure[128] = {0};
   int8_t prev[128];
   memcpy(prev, s_last_owner, sizeof prev);
@@ -539,7 +586,7 @@ static int positions_at_scaled(double t, LagoonSceneMotion *out, int scale) {
     if (!s_pkt.visible[i]) continue;
     int k = s_owner[i], mx, my;   /* motion in units */
     if (k == kOwnerScreen) continue;  /* HUD: exactly where the game put it */
-    int nasir = k == 0;
+    int nasir = k >= 0 && late((unsigned)k);   /* built from the previous field (Nasir, monsters) */
     if (k >= 0) {
       mx = (int)lround(scale * now.ax[k]) - scale * ref_ax(k);
       my = (int)lround(scale * now.ay[k]) - scale * ref_ay(k);

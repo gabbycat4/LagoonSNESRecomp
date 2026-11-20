@@ -621,3 +621,22 @@ Round 9 (Nov 20): Comfort tab in the in-game Options menu (user: chicken looks g
   test block; whole settings suite PASS (gcc needs -Wno-misleading-indentation for the
   original code's one-line style under -Werror). Renders comfort.ppm: build-port/comfort-preview.png.
 - main.c, lagoon_smooth.c, lagoon_settings.c compile with the real flags; t8 PASS.
+
+Round 10 (Nov 20): cave monsters looked blurry (phone video monsterslagoon.mp4; worse at 120).
+- Not the 1,1,0 rhythm alone. Session 10 (room 3, OAM log): a monster's pieces went to NOBODY on
+  every step field (owner -1), so they froze a field (sometimes two) and then caught up with a
+  2-3 px jump: piece x per picture 2600 2600 2600 | 2603 2603 2604 | 2604 x6 | 2605 2605 2606 |
+  2611 ... = stop-go = blur.
+- Cause: monsters' sprites are built from the PREVIOUS field's position, like Nasir's (type 2
+  pieces fit prev-field actor 66% vs this-field 21-34%). The code assumed only Nasir is late (town
+  NPCs are on time), so on a step field "the pieces stood still while the monster moved" -> nobody.
+- Fix: each character LEARNS its timing (learn_timing, before owners): pieces that were k's in the
+  previous packet (same slot, same picture), on fields where k moved on exactly one of the last
+  two fields: did the pieces move by this field's motion or the previous field's? Late after 3+
+  and twice the other (hysteresis; halves at 64; reset with the palettes when a slot's character
+  changes). late(k) replaces "k == 0" in the reference, motion test and placement.
+- Session 10 after: monster 8 pieces glide every picture (2601 2603 2605 ...), owner 8 throughout;
+  jumps > 1 half px: monster 8 924 -> 6, 9 768 -> 403, 10 724 -> 474, 16 490 -> 246; room 3
+  jumps > 0.5 px 1433 -> 1017. Reversals rose (monster 8 50 -> 119): they are the game's own turns
+  (x 538 53a 538 536), now counted because the pieces are owned. Sessions 7 and 9: town identical,
+  guards identical; t8 PASS; compile clean.
