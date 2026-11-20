@@ -1,24 +1,26 @@
-# Lagoon round 14: Samson in one piece, clearer Comfort tab, settings logged
+# Lagoon: publish the fork on GitHub (gabbycat4/LagoonSNESRecomp)
 # Every line is a fish comment or a command, so a whole block can be pasted.
 
-# --- 1. Rebuild ---
+# --- 1. Commit the new README section ---
 cd ~/Projects/LagoonSNESRecomp
-cmake --build build-port --target LagoonSNESRecomp 2>&1 | tail -5
+git add README.md STEPS.txt notes.txt
+git commit -m "README: what this eye-comfort fork adds, settings, credits"
 
-# --- 2. Set the options, then QUIT (240 needs a restart) ---
-# Options > Comfort: Screen shake -> Off.  Pictures per second -> it shows "180 > 240".
-# Quit the game. The next start runs at 240 with the shake off.
+# --- 2. Upload: the work branch, and the same commits as your main ---
+# (main on GitHub is still the original port; this moves it forward to your version)
 cd ~/Projects/LagoonSNESRecomp
-./build-port/LagoonSNESRecomp --no-launcher --rom lagoon.sfc 2> settings.txt
-grep "lagoon-settings\|lagoon-shake" settings.txt
-# Expect: saved ScreenShake = 0, saved PicturesPerSecond = 240, screen shake OFF
+git push -u origin smooth-motion
+git push origin smooth-motion:main
+git branch -f main smooth-motion
+# If a push asks for a login, use the same way as for your other recomps.
+# If "push origin smooth-motion:main" is REJECTED, stop and send Claude the message.
 
-# --- 3. Start again and fight Samson (logs on) ---
-cd ~/Projects/LagoonSNESRecomp
-env LAGOON_SMOOTH_LOG=smooth.log LAGOON_MOTION_LOG=motion.log LAGOON_OAM_LOG=oam.log mangohud ./build-port/LagoonSNESRecomp --no-launcher --rom lagoon.sfc 2> profile.txt
-# MangoHud should show ~240. Tell Claude "done": Samson and Nasir steady?
+# --- 3. On the GitHub page (in the browser) ---
+# github.com/gabbycat4/LagoonSNESRecomp -> the gear next to "About" ->
+#   Description: Lagoon (SNES) recompiled for PC: 240 Hz smooth motion, no slowdown, screen shake off. Needs your own ROM.
+#   Topics (optional): snes  recompilation  lagoon  240hz  pc-port
+#   Save changes.
+# Do NOT press "Sync fork" -> "Discard commits": that would throw your work away.
 
-# --- 4. Commit when happy ---
-cd ~/Projects/LagoonSNESRecomp
-git --no-optional-locks add CMakeLists.txt src/lagoon_shake.c src/lagoon_shake.h src/lagoon_wide_multipart.c src/lagoon_smooth.c src/lagoon_smooth.h src/lagoon_settings.c src/lagoon_settings.h src/main.c tests/lagoon_settings_test.c tools/smooth-tests/tshake.c tools/smooth-tests/stub.c tools/smooth-tests/replay.c notes.txt STEPS.txt
-git --no-optional-locks commit -m "Screen shake off; Samson's measured shape (one piece); Comfort tab shows restart values; settings saves logged"
+# --- 4. Check: the repo page shows "This branch is 15 commits ahead of rages4calm/LagoonSNESRecomp:main"
+#        and the README starts with "gabbycat4's eye-comfort fork". Tell Claude "done". ---

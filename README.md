@@ -1,4 +1,55 @@
-# Lagoon Recomp
+# Lagoon Recomp — gabbycat4's eye-comfort fork
+
+> **This is an unofficial fork** of [rages4calm/LagoonSNESRecomp](https://github.com/rages4calm/LagoonSNESRecomp).
+> The original port keeps Lagoon's authentic 30 fps feel with quality-of-life
+> features. This fork aims at the **least eye strain**: the highest refresh
+> rate, the least blur and no slowdown. All the original port's features are
+> still here. Everything this fork adds is optional and can be switched in the
+> in-game **Options → Comfort** tab or in `config.ini`.
+
+**What this fork adds** (branch `main`, developed on `smooth-motion`):
+
+- **Smooth motion at 120, 180 or 240 pictures per second.** Lagoon moves its
+  world 30 times a second; the in-between pictures are drawn from the game's
+  own data, so characters glide instead of hopping. At 240 the game runs at
+  59.94 fields/s (239.76 Hz) so it fits a 240 Hz screen; music is unaffected.
+- **Half-pixel motion** (2x pictures): motion in half-pixel steps for sharper, steadier movement.
+- **Steady camera**: no stop-and-go when walking diagonally.
+- **Remove slowdown**: gives the game's processor more time so busy places
+  (town) never chug. Music and sound keep their original timing.
+- **Screen shake off**: the boss quake (Samson) keeps the picture still; the
+  event and its sound still happen.
+- **Drawing on several cores**: each picture is drawn by three CPU cores
+  together (identical pixels), so no pictures are skipped at 240.
+- Guards, doors, NPCs, the chicken, cave monsters and Samson stay in one piece
+  and in step while smoothed.
+
+| `[Lagoon]` key in `config.ini` | Values | Default |
+|---|---|---|
+| `PicturesPerSecond` | 60 (off), 120, 180, 240 | 60 |
+| `HalfPixels` | 1 / 0 | 1 |
+| `SmoothCamera` | 1 / 0 | 1 |
+| `CpuSpeed` | 100 (original) / 150 (no slowdown), up to 400 | 100 |
+| `ScreenShake` | 1 / 0 | 1 |
+| `DrawThreads` | 1–4 | 3 |
+| `SecondCore` | 1 / 0 | 1 |
+
+Pictures per second and half pixels apply when the game starts; the others
+apply at once. Developed and tested on Linux (CachyOS, Ryzen 7 2700, RX 6600,
+240 Hz FreeSync). Windows/macOS builds are untested; on Windows each picture is
+drawn by one core. Build it the same way as the original port
+([Build & mod](docs/BUILDING.md)). **Bring your own clean Lagoon USA ROM.**
+
+The download buttons below are the **original** port's releases, without this
+fork's changes. Credits: the original port and everything below is by
+rages4calm and contributors ([CREDITS.md](CREDITS.md)), built with
+[SNESRecomp](https://github.com/RetroPortingToolKit/snesrecomp). Same license
+as the original: [PolyForm Noncommercial 1.0.0](LICENSE).
+
+---
+
+## The original port
+
 
 <p align="center"><img src="docs/branding/lagoon-logo.png" width="680" alt="Lagoon — redrawn box-art logo contributed by DarkShadowRage"></p>
 
